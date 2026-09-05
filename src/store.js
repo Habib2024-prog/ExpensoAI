@@ -35,21 +35,79 @@ export const CATEGORIES = {
 
 let db;
 
+// ---- cloud storage (Vercel/Upstash) vs local JSON file ----
+// When UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN are set, the whole
+// database lives in Redis so serverless hosts with read-only filesystems work.
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+export const cloudMode = Boolean(REDIS_URL && REDIS_TOKEN);
+const DB_KEY = 'expenzo:db';
+let pendingWrite = Promise.resolve();
+
+const emptyDb = () => ({ users: [], sessions: {}, accounts: [], transactions: [], liabilities: [], counters: {} });
+
+async function redisCmd(commands) {
+  const res = await fetch(REDIS_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}` },
+    body: JSON.stringify([commands])
+  });
+  if (!res.ok) throw new Error(`redis ${res.status}`);
+  return res.json();
+}
+
 export function getDb() {
   return db;
 }
 
 export function load() {
+  if (db) return db;
+  if (cloudMode) {
+    // real state arrives via reload() on each request; seed on first write if empty
+    db = emptyDb();
+    return db;
+  }
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (fs.existsSync(DB_PATH)) {
     db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
     migrate();
   } else {
-    db = { users: [], sessions: {}, accounts: [], transactions: [], liabilities: [], counters: {} };
+    db = emptyDb();
     seed();
     save();
   }
   return db;
+}
+
+// pull the latest state from Redis before handling a request (cloud mode only)
+export async function reload() {
+  if (!cloudMode) return;
+  await pendingWrite;
+  try {
+    const r = await redisCmd(['GET', DB_KEY]);
+    const raw = r?.[0]?.result;
+    if (raw) {
+      const fresh = JSON.parse(raw);
+      for (const k of Object.keys(db)) db[k] = fresh[k] ?? emptyDb()[k];
+    } else if (!db.users.length) {
+      seed();
+      await writeCloud();
+    }
+  } catch (e) {
+    console.error('cloud load failed:', e.message);
+  }
+}
+
+function writeCloud() {
+  pendingWrite = pendingWrite
+    .then(() => redisCmd(['SET', DB_KEY, JSON.stringify(db)]))
+    .catch((e) => console.error('cloud save failed:', e.message));
+  return pendingWrite;
+}
+
+export function save() {
+  if (cloudMode) { writeCloud(); return; }
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
 // bring older databases up to the accounts model
@@ -81,10 +139,6 @@ function migrate() {
     }
   }
   if (touched) save();
-}
-
-export function save() {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
 export function nextId(kind) {

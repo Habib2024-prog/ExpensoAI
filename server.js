@@ -3,7 +3,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   load, save, getDb, nextId, hashPassword, verifyPassword, newToken,
-  CURRENCIES, CATEGORIES, toUSD, fromUSD, round2, round4, todayStr, createDefaultAccount
+  CURRENCIES, CATEGORIES, toUSD, fromUSD, round2, round4, todayStr, createDefaultAccount,
+  reload as reloadStore, cloudMode
 } from './src/store.js';
 import { startRateRefresh, getRates, isLive } from './src/rates.js';
 import { balanceUpToAccount, buildForecast, buildAlerts, chatReply } from './src/intelligence.js';
@@ -14,6 +15,11 @@ app.use(express.json());
 
 load();
 startRateRefresh();
+
+// cloud mode: pull the latest state from Redis before every API request
+app.use('/api', async (req, res, next) => {
+  try { await reloadStore(); next(); } catch (e) { next(e); }
+});
 
 // ---------- auth middleware ----------
 
@@ -479,9 +485,16 @@ app.get('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  const { updatedAt, live } = getRates();
-  console.log(`\n  ✦ Expenzo running →  http://localhost:${PORT}`);
-  console.log(`  ✦ FX rates: ${live ? 'LIVE (open.er-api.com)' : 'offline fallback'} · updated ${new Date(updatedAt).toLocaleString()}`);
-  console.log(`  ✦ admin login: habibullahanoosha2019@gmail.com\n`);
-});
+
+// on Vercel the app is exported as a serverless handler — no listen() there
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    const { updatedAt, live } = getRates();
+    console.log(`\n  ✦ Expenzo running →  http://localhost:${PORT}`);
+    console.log(`  ✦ FX rates: ${live ? 'LIVE (open.er-api.com)' : 'offline fallback'} · updated ${new Date(updatedAt).toLocaleString()}`);
+    console.log(`  ✦ admin login: ${process.env.ADMIN_EMAIL || 'habibullahanoosha2019@gmail.com'}`);
+    console.log(`  ✦ storage: ${cloudMode ? 'Upstash Redis (cloud)' : 'local JSON file'}\n`);
+  });
+}
+
+export default app;

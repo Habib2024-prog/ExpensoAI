@@ -14,22 +14,27 @@ npm start
 
 ## Deploy
 
-The app is a single Node process with file-based storage — it runs anywhere Node 18+ runs (Render, Railway, Fly.io, a VPS, Docker). No database server, no build step, no API keys.
+### Vercel (free)
 
-1. Push this repo to your Git host and create a Node service/web service pointing at it (build: `npm install`, start: `npm start`).
-2. Set the environment variables (optional but recommended):
+The app runs as a Vercel serverless function with data stored in Upstash Redis (free tier) — the serverless filesystem is read-only, so a plain `data/` folder won't work there.
 
-| Variable | Default | Purpose |
+1. Push this repo to GitHub.
+2. Create a free database at [upstash.com](https://upstash.com) (Redis) and copy the `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` from its dashboard.
+3. Import the repo in Vercel and set the environment variables:
+
+| Variable | Required | Purpose |
 |---|---|---|
-| `PORT` | `3000` | server port (most hosts inject this) |
-| `ADMIN_EMAIL` | `habibullahanoosha2019@gmail.com` | admin account created on first boot |
-| `ADMIN_PASSWORD` | `Anoosha0101` | admin password — **set your own on the host** |
-| `ADMIN_NAME` | `Khaliqyar` | admin display name |
-| `ADMIN_CURRENCY` | `PKR` | admin base currency |
+| `UPSTASH_REDIS_REST_URL` | yes (Vercel) | cloud database endpoint |
+| `UPSTASH_REDIS_REST_TOKEN` | yes (Vercel) | cloud database token |
+| `ADMIN_EMAIL` | no | admin created on first boot (default `habibullahanoosha2019@gmail.com`) |
+| `ADMIN_PASSWORD` | no | admin password (**set your own**) |
+| `ADMIN_NAME` / `ADMIN_CURRENCY` | no | admin display name / base currency |
 
-3. Attach a persistent disk mounted at `/app/data` (or wherever the app runs) — `data/db.json` holds users and transactions, and `data/rates.json` caches FX rates. Without persistence, data resets on redeploy.
+4. Deploy. Every API request syncs through Redis, so data survives cold starts and redeploys.
 
-> Note: storage is a JSON file, so run a single instance (no serverless/multi-replica). For scale-out, swap `src/store.js` for a real database — the API layer is isolated from it.
+### Railway / Render / Fly.io / VPS (long-running host)
+
+No changes needed — the app stores data in `data/db.json` locally. On hosts with ephemeral disks, attach a persistent volume mounted at the app's `data/` folder. Run a single instance (file storage isn't multi-replica safe); the storage layer is isolated in `src/store.js` if you ever want to swap in Postgres/Mongo.
 
 ## Admin account
 
