@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import {
   load, save, getDb, nextId, hashPassword, verifyPassword, newToken,
   CURRENCIES, CATEGORIES, toUSD, fromUSD, round2, round4, todayStr, createDefaultAccount,
-  reload as reloadStore, cloudMode
+  reload as reloadStore, cloudMode, getStoreStatus
 } from './src/store.js';
 import { startRateRefresh, getRates, isLive } from './src/rates.js';
 import { balanceUpToAccount, buildForecast, buildAlerts, chatReply } from './src/intelligence.js';
@@ -19,6 +19,19 @@ startRateRefresh();
 // cloud mode: pull the latest state from Redis before every API request
 app.use('/api', async (req, res, next) => {
   try { await reloadStore(); next(); } catch (e) { next(e); }
+});
+
+// public diagnostic endpoint — helps debug a fresh deployment
+app.get('/api/health', async (req, res) => {
+  try { await reloadStore(); } catch {}
+  const st = getStoreStatus();
+  res.json({
+    ...st,
+    hint: st.cloudMode
+      ? (st.ok ? 'cloud database connected and seeded ✅'
+               : `database problem → check UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN in Vercel → Settings → Environment Variables (${st.lastError || 'no users found'})`)
+      : 'running in local file mode (env vars not set on this deployment)'
+  });
 });
 
 // ---------- auth middleware ----------
@@ -81,6 +94,10 @@ app.post('/api/register', (req, res) => {
 });
 
 app.post('/api/login', (req, res) => {
+  const st = getStoreStatus();
+  if (st.cloudMode && !st.ok && st.lastError) {
+    return res.status(503).json({ error: 'Database unreachable on the server — fix the UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN environment variables in Vercel → Settings → Environment Variables, then redeploy.' });
+  }
   const { email, password } = req.body || {};
   const db = getDb();
   const user = db.users.find((u) => u.email === String(email || '').toLowerCase().trim());

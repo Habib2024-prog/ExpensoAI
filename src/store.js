@@ -43,6 +43,7 @@ const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 export const cloudMode = Boolean(REDIS_URL && REDIS_TOKEN);
 const DB_KEY = 'expenzo:db';
 let pendingWrite = Promise.resolve();
+let lastError = null;
 
 const emptyDb = () => ({ users: [], sessions: {}, accounts: [], transactions: [], liabilities: [], counters: {} });
 
@@ -93,9 +94,20 @@ export async function reload() {
       seed();
       await writeCloud();
     }
+    lastError = null;
   } catch (e) {
-    console.error('cloud load failed:', e.message);
+    lastError = 'cloud load failed: ' + e.message;
+    console.error(lastError);
   }
+}
+
+export function getStoreStatus() {
+  return {
+    cloudMode,
+    ok: cloudMode ? !lastError && db.users.length > 0 : true,
+    lastError,
+    userCount: db.users.length
+  };
 }
 
 function writeCloud() {
