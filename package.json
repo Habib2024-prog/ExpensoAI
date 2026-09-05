@@ -1,0 +1,16 @@
+{
+  "name": "expenso-ai",
+  "version": "1.0.0",
+  "description": "Expenzo \u2014 premium Gen-Z expense tracker with AI assistant, forecasting, multi-currency, admin verification and liability alerts",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Expenzo — money, but make it aesthetic</title>
+<meta name="description" content="Premium expense tracker with AI assistant, forecasting, multi-currency wallets, liability alerts and admin-verified accounts."/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="styles.css"/>
+<script>try{if(localStorage.getItem('expenzo_theme')==='light')document.documentElement.dataset.theme='light'}catch(e){}</script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%238b5cf6'/><text x='50' y='72' font-size='62' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'>E</text></svg>"/>
+</head>
+<body>
+<div class="blobs"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
+<div id="toasts"></div>
+
+<!-- ==================== AUTH ==================== -->
+<div id="authView">
+  <button class="icon-btn auth-theme" onclick="toggleTheme()" title="Toggle light / dark" id="themeBtnAuth">🌙</button>
+  <div class="auth-hero">
+    <div class="logo logo-big"><span class="x">Expenzo</span></div>
+    <div>
+      <h1>money,<br/>but make it<br/><span class="grad-text">aesthetic.</span></h1>
+      <p>Track income, expenses &amp; liabilities in AFN, USD, PKR and more — with live exchange rates, multi-currency wallets, AI forecasts and due-date alerts.</p>
+      <div class="chips">
+        <span class="pill violet">🤖 AI assistant</span>
+        <span class="pill cyan">📈 forecasting</span>
+        <span class="pill green">🌍 live FX rates</span>
+        <span class="pill amber">⏰ due alerts</span>
+        <span class="pill red">🚫 overbalance guard</span>
+      </div>
+    </div>
+    <div class="footer-credit">Built with <span class="heart">❤</span> by Khaliqyar</div>
+  </div>
+  <div class="auth-form-wrap">
+    <div class="auth-card card glow">
+      <div class="auth-tabs">
+        <button id="tabLogin" class="on" onclick="switchAuth('login')">Log in</button>
+        <button id="tabRegister" onclick="switchAuth('register')">Sign up</button>
+      </div>
+
+      <form id="loginForm">
+        <div class="field"><label class="fld">Email</label><input id="li_email" type="email" placeholder="you@vibes.com" required/></div>
+        <div class="field"><label class="fld">Password</label><input id="li_pass" type="password" placeholder="••••••••" required/></div>
+        <button class="btn wfull" type="submit">Let me in ✨</button>
+      </form>
+
+      <form id="registerForm" style="display:none">
+        <div class="field"><label class="fld">Name</label><input id="rg_name" placeholder="What do we call you?" required/></div>
+        <div class="field"><label class="fld">Email</label><input id="rg_email" type="email" placeholder="you@vibes.com" required/></div>
+        <div class="field"><label class="fld">Password (6+ chars)</label><input id="rg_pass" type="password" placeholder="••••••••" required minlength="6"/></div>
+        <div class="field"><label class="fld">Your currency <span style="text-transform:none;letter-spacing:0">(locked after signup)</span></label><div id="rg_currency"></div></div>
+        <button class="btn wfull" type="submit">Create account 🚀</button>
+        <div class="demo-hint">🔒 new accounts need an <b>admin verification</b> before logging in. your first wallet is created in this currency — you can add more wallets in other currencies later.</div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== APP ==================== -->
+<div id="appView">
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="logo"><span class="x">Expenzo</span></div>
+      <a class="nav-item" data-nav="dashboard" href="#/dashboard"><span class="ico">🏠</span>Dashboard</a>
+      <a class="nav-item" data-nav="transactions" href="#/transactions"><span class="ico">💳</span>Transactions</a>
+      <a class="nav-item" data-nav="liabilities" href="#/liabilities"><span class="ico">🧾</span>Liabilities<span class="dot" id="navLiabDot" style="display:none">0</span></a>
+      <a class="nav-item" data-nav="forecast" href="#/forecast"><span class="ico">📈</span>Forecast</a>
+      <a class="nav-item" data-nav="assistant" href="#/assistant"><span class="ico">🤖</span>Zeno AI</a>
+      <a class="nav-item" data-nav="admin" href="#/admin" id="navAdmin" style="display:none"><span class="ico">🛡️</span>Admin<span class="dot" id="navAdminDot" style="display:none">0</span></a>
+      <div class="spacer"></div>
+      <div class="user-chip">
+        <div class="avatar" id="userAvatar">?</div>
+        <div style="min-width:0">
+          <div class="nm" id="userName">…</div>
+          <div class="rl" id="userRole">…</div>
+        </div>
+        <span style="margin-left:auto;display:flex;gap:6px">
+          <button class="icon-btn" title="Change password" onclick="openPasswordModal()">🔑</button>
+          <button class="icon-btn" title="Log out" onclick="logout()">⏻</button>
+        </span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h2 id="pageTitle">Dashboard</h2>
+          <div class="sub" id="pageSub"></div>
+        </div>
+        <div class="top-actions">
+          <div class="pill violet rate-ticker" id="rateTicker" title="live exchange rates">🪙 loading rates…</div>
+          <button class="icon-btn" onclick="toggleTheme()" title="Toggle light / dark" id="themeBtn">🌙</button>
+          <div class="bell" onclick="toggleBell(event)">🔔<span class="dot" id="bellDot" style="display:none">!</span>
+            <div class="bell-pop" id="bellPop"></div>
+          </div>
+          <button class="btn sm" onclick="openTxModal()">＋ Add</button>
+        </div>
+      </div>
+
+      <!-- mobile-only account bar (sidebar is hidden on small screens) -->
+      <div class="mobile-user" id="mobileUser">
+        <div class="avatar" id="mAvatar">?</div>
+        <div class="mu-info">
+          <div class="nm" id="mUserName">…</div>
+          <div class="rl" id="mUserRole">…</div>
+        </div>
+        <button class="icon-btn" title="Change password" onclick="openPasswordModal()">🔑</button>
+        <button class="btn sm ghost" onclick="logout()">Sign out ⏻</button>
+      </div>
+
+      <section id="view-dashboard" class="view"></section>
+      <section id="view-transactions" class="view" style="display:none"></section>
+      <section id="view-liabilities" class="view" style="display:none"></section>
+      <section id="view-forecast" class="view" style="display:none"></section>
+      <section id="view-assistant" class="view" style="display:none"></section>
+      <section id="view-admin" class="view" style="display:none"></section>
+
+      <footer class="app-footer">Built with <span class="heart">❤</span> by Khaliqyar</footer>
+    </main>
+  </div>
+
+  <nav class="bottom-nav" id="bottomNav">
+    <a data-nav="dashboard" href="#/dashboard"><span>🏠</span>Home</a>
+    <a data-nav="transactions" href="#/transactions"><span>💳</span>Txs</a>
+    <a data-nav="liabilities" href="#/liabilities"><span>🧾</span>Debts</a>
+    <a data-nav="forecast" href="#/forecast"><span>📈</span>Stats</a>
+    <a data-nav="assistant" href="#/assistant"><span>🤖</span>Zeno</a>
+    <a data-nav="admin" href="#/admin" id="navAdminBottom" style="display:none"><span>🛡️</span>Admin</a>
+  </nav>
+</div>
+
+<!-- ==================== MODALS ==================== -->
+<div class="modal-bg" id="txModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('txModal')">✕</button>
+    <h3>New transaction</h3>
+    <button class="btn ghost wfull scan-btn" onclick="openScan()">🧾 Upload receipt</button>
+    <div class="seg">
+      <button id="segExpense" class="on exp" onclick="setTxType('expense')">💸 Expense</button>
+      <button id="segIncome" class="inc" onclick="setTxType('income')">💰 Income</button>
+    </div>
+    <div class="field"><label class="fld">Wallet</label><div id="tx_account"></div></div>
+    <div class="grid cols-2" style="gap:14px">
+      <div class="field"><label class="fld">Amount</label><input id="tx_amount" type="number" min="0" step="any" placeholder="0.00"/></div>
+      <div class="field"><label class="fld">Date <span style="text-transform:none;letter-spacing:0">(today or earlier)</span></label><input id="tx_date" type="date"/></div>
+    </div>
+    <div class="field"><label class="fld">Category</label><div id="tx_category"></div></div>
+    <div class="field"><label class="fld">Note</label><input id="tx_note" placeholder="what was it for? (optional)" maxlength="140"/></div>
+    <div id="tx_balanceHint" style="font-size:12.5px;color:var(--muted);margin:-6px 0 14px"></div>
+    <button class="btn wfull" onclick="saveTx()">Save it 🔥</button>
+  </div>
+</div>
+
+<div class="modal-bg" id="accountModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('accountModal')">✕</button>
+    <h3>New wallet</h3>
+    <div class="field"><label class="fld">Wallet name</label><input id="ac_name" placeholder="e.g. Bank, Cash, JazzCash…" maxlength="40"/></div>
+    <div class="field"><label class="fld">Currency</label><div id="ac_currency"></div></div>
+    <div id="ac_rateHint" style="font-size:12.5px;color:var(--muted);margin:-6px 0 14px"></div>
+    <button class="btn wfull" onclick="saveAccount()">Create wallet 🪙</button>
+  </div>
+</div>
+
+<div class="modal-bg" id="scanModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeScan()">✕</button>
+    <h3>Upload receipt 🧾</h3>
+    <div class="dropzone" id="dropzone">
+      <div class="dz-big">🧾</div>
+      <div class="dz-txt"><b>Click to choose a receipt photo</b><br/><small>or drag &amp; drop / paste (Ctrl+V) — JPG or PNG</small></div>
+    </div>
+    <input type="file" id="scanFile" accept="image/*" hidden/>
+    <img id="scanPreview" class="scan-preview" alt="receipt preview" style="display:none"/>
+    <div class="scan-progress" id="scanProgress" style="display:none">
+      <div class="scan-status" id="scanStatus">starting…</div>
+      <div class="track"><div class="fill" id="scanBar" style="width:0%"></div></div>
+    </div>
+    <div class="scan-result" id="scanResult"></div>
+  </div>
+</div>
+
+<div class="modal-bg" id="passModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('passModal')">✕</button>
+    <h3>Change password 🔑</h3>
+    <div class="field"><label class="fld">Current password</label><input id="pw_current" type="password" placeholder="••••••••"/></div>
+    <div class="field"><label class="fld">New password (6+ chars)</label><input id="pw_new" type="password" placeholder="••••••••"/></div>
+    <div class="field"><label class="fld">Repeat new password</label><input id="pw_confirm" type="password" placeholder="••••••••"/></div>
+    <button class="btn wfull" onclick="savePassword()">Update password ✅</button>
+  </div>
+</div>
+
+<div class="modal-bg" id="liabModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('liabModal')">✕</button>
+    <h3>New liability</h3>
+    <div class="field"><label class="fld">What do you owe?</label><input id="lb_name" placeholder="e.g. Laptop installment, loan from Karim…" maxlength="80"/></div>
+    <div class="grid cols-2" style="gap:14px">
+      <div class="field"><label class="fld">Amount</label><input id="lb_amount" type="number" min="0" step="any" placeholder="0.00"/></div>
+      <div class="field"><label class="fld">Due date</label><input id="lb_due" type="date"/></div>
+    </div>
+    <div class="field"><label class="fld">Pay from wallet</label><div id="lb_account"></div></div>
+    <button class="btn wfull" onclick="saveLiab()">Add liability 🧾</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
