@@ -96,7 +96,11 @@ app.post('/api/register', (req, res) => {
 app.post('/api/login', (req, res) => {
   const st = getStoreStatus();
   if (st.cloudMode && !st.ok && st.lastError) {
-    return res.status(503).json({ error: 'Database unreachable on the server — fix the UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN environment variables in Vercel → Settings → Environment Variables, then redeploy.' });
+    const reason = st.lastError.includes('401') ? 'the TOKEN is wrong (or URL and token are from different databases)'
+      : st.lastError.includes('404') ? 'the URL is wrong'
+      : st.lastError.includes('fetch failed') ? 'the URL is not a valid https:// REST endpoint (did you paste a redis:// connection string?)'
+      : 'unknown — see /api/health';
+    return res.status(503).json({ error: `Database unreachable on the server (${reason}). Fix it in Vercel → Settings → Environment Variables → UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN, then redeploy.` });
   }
   const { email, password } = req.body || {};
   const db = getDb();
