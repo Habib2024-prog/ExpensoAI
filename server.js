@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import {
   load, save, getDb, nextId, hashPassword, verifyPassword, newToken,
   CURRENCIES, CATEGORIES, toUSD, fromUSD, round2, round4, todayStr, createDefaultAccount,
-  reload as reloadStore, cloudMode, getStoreStatus
+  reload as reloadStore, cloudMode, getStoreStatus, pendingWrites
 } from './src/store.js';
 import { startRateRefresh, getRates, isLive } from './src/rates.js';
 import { balanceUpToAccount, buildForecast, buildAlerts, chatReply } from './src/intelligence.js';
@@ -16,9 +16,16 @@ app.use(express.json());
 load();
 startRateRefresh();
 
-// cloud mode: pull the latest state from Redis before every API request
+// cloud mode: pull the latest state from Redis before every API request, and
+// hold back the JSON response until the handler's write has actually landed —
+// otherwise serverless freezes could drop the write right after responding.
 app.use('/api', async (req, res, next) => {
-  try { await reloadStore(); next(); } catch (e) { next(e); }
+  try {
+    await reloadStore();
+    const json = res.json.bind(res);
+    res.json = (body) => Promise.resolve(pendingWrites()).then(() => json(body));
+    next();
+  } catch (e) { next(e); }
 });
 
 // public diagnostic endpoint — helps debug a fresh deployment

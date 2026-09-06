@@ -47,18 +47,22 @@ let lastError = null;
 
 const emptyDb = () => ({ users: [], sessions: {}, accounts: [], transactions: [], liabilities: [], counters: {} });
 
-async function redisCmd(commands) {
-  const res = await fetch(REDIS_URL, {
+// single command → POST to the root endpoint; SET (pipeline) → /pipeline endpoint.
+// the formats differ on Upstash: root takes ["GET","key"], /pipeline takes [["SET",...]]
+async function redisCmd(commands, pipeline = false) {
+  const url = pipeline ? `${REDIS_URL}/pipeline` : REDIS_URL;
+  const res = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify([commands])
+    body: JSON.stringify(pipeline ? [commands] : commands)
   });
   if (!res.ok) {
     let detail = '';
     try { detail = (await res.text()).slice(0, 160); } catch {}
     throw new Error(`redis ${res.status} ${detail}`.trim());
   }
-  return res.json();
+  const j = await res.json();
+  return pipeline ? j : [j]; // normalize: always an array of {result}
 }
 
 export function getDb() {
@@ -116,14 +120,19 @@ export function getStoreStatus() {
 
 function writeCloud() {
   pendingWrite = pendingWrite
-    .then(() => redisCmd(['SET', DB_KEY, JSON.stringify(db)]))
+    .then(() => redisCmd(['SET', DB_KEY, JSON.stringify(db)], true))
     .catch((e) => console.error('cloud save failed:', e.message));
   return pendingWrite;
 }
 
 export function save() {
-  if (cloudMode) { writeCloud(); return; }
+  if (cloudMode) { writeCloud(); return; } // returns the write promise for awaiting
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+}
+
+// resolves once every queued cloud write has completed
+export function pendingWrites() {
+  return cloudMode ? pendingWrite : Promise.resolve();
 }
 
 // bring older databases up to the accounts model
