@@ -50,10 +50,14 @@ const emptyDb = () => ({ users: [], sessions: {}, accounts: [], transactions: []
 async function redisCmd(commands) {
   const res = await fetch(REDIS_URL, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${REDIS_TOKEN}` },
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify([commands])
   });
-  if (!res.ok) throw new Error(`redis ${res.status}`);
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.text()).slice(0, 160); } catch {}
+    throw new Error(`redis ${res.status} ${detail}`.trim());
+  }
   return res.json();
 }
 
