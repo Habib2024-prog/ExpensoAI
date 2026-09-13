@@ -6,9 +6,19 @@ A premium Gen-Z expense tracker. Track **income, expenses and liabilities** in *
 
 ```bash
 npm install
-npm start
+ADMIN_EMAIL=you@example.com ADMIN_PASSWORD='use-at-least-12-characters' npm start
 # → http://localhost:3000
 ```
+
+PowerShell:
+
+```powershell
+$env:ADMIN_EMAIL = 'you@example.com'
+$env:ADMIN_PASSWORD = 'use-at-least-12-characters'
+npm start
+```
+
+The admin variables are required only when the database is created for the first time.
 
 `PORT` is respected (`PORT=8080 npm start`).
 
@@ -26,8 +36,8 @@ The app runs as a Vercel serverless function with data stored in Upstash Redis (
 |---|---|---|
 | `UPSTASH_REDIS_REST_URL` | yes (Vercel) | cloud database endpoint |
 | `UPSTASH_REDIS_REST_TOKEN` | yes (Vercel) | cloud database token |
-| `ADMIN_EMAIL` | no | admin created on first boot (default `habibullahanoosha2019@gmail.com`) |
-| `ADMIN_PASSWORD` | no | admin password (**set your own**) |
+| `ADMIN_EMAIL` | yes (first boot) | email for the first administrator |
+| `ADMIN_PASSWORD` | yes (first boot) | administrator password (minimum 12 characters) |
 | `ADMIN_NAME` / `ADMIN_CURRENCY` | no | admin display name / base currency |
 
 4. Deploy. Every API request syncs through Redis, so data survives cold starts and redeploys.
@@ -38,13 +48,12 @@ No changes needed — the app stores data in `data/db.json` locally. On hosts wi
 
 ## Admin account
 
-On first boot the app creates the admin from the `ADMIN_*` environment variables (defaults: `habibullahanoosha2019@gmail.com` / `Anoosha0101`). New sign-ups are pending until this admin verifies them from the **Admin** tab. The admin can change their password anytime (🔑 in the sidebar).
+On first boot the app creates the administrator from the required `ADMIN_EMAIL` and `ADMIN_PASSWORD` environment variables. New sign-ups are pending until this administrator verifies them from the **Admin** tab. Administrators can change their own password anytime (🔑 in the sidebar).
 
 ## Features
 
 - **Auth + admin verification** — sign-ups land in a *pending* state and can't log in until an admin approves them in the **Admin** tab (verify / reject / delete).
-- **Multi-currency wallets** 🪙 — every user gets a "Main" wallet in their signup currency and can add **more wallets in other currencies** from the dashboard. Each wallet keeps its own currency and balance; the total converts at live rates. Base currency is locked at signup.
-- **Live exchange rates** — rates pulled from `open.er-api.com` every 6h (cached in `data/rates.json`, offline fallback built in). The header ticker and wallet cards show the real rate.
+- **Multi-currency wallets** 🪙 — every user gets a "Main" wallet in their signup currency and can add **more wallets in other currencies** from the dashboard. Each wallet keeps its own currency and stable balance; currencies are never converted or added together. Base currency is locked at signup.
 - **Income & expenses** — categorize, note, date them (**today or earlier only**). Entries save in the wallet's currency.
 - **Over-balance guard** 🚫 — an expense is rejected if it would push *that wallet's* balance below zero.
 - **Liabilities + due-date alerts** ⏰ — debts with due dates, tied to a wallet; overdue (🔴) and due-within-7-days (🟡) alerts in the bell, dashboard, and nav badge. Marking one *paid* records a linked expense on that wallet (undo reverses it).
@@ -52,14 +61,13 @@ On first boot the app creates the admin from the `ADMIN_*` environment variables
 - **Forecasting** 📈 — linear-regression trend (damped) over your history projects income, spending, and net for the next 3 months, plus an expected category breakdown, drawn as an SVG chart.
 - **Custom dropdowns** — styled currency/category/wallet pickers instead of native selects.
 - **Receipt upload + OCR** 🧾 — in the Add-transaction modal, upload a receipt photo (click, drag & drop or paste from clipboard); on-device OCR (Tesseract.js) with image preprocessing (upscale, grayscale, contrast stretch) extracts the total, date and merchant and prefills the form for you to confirm.
-- **Passwords** 🔑 — every user can change their own password (sidebar/mobile profile → 🔑); admins can set a new password for any user from the Admin tab.
+- **Passwords** 🔑 — every account owner can change only their own password (sidebar/mobile profile → 🔑). Administrators cannot reset or change another user's password.
 - **Light & dark mode** 🌙☀️ — theme toggle in the header (and on the login page); your choice is remembered.
 - **Premium Gen-Z UI** — dark glassmorphism, animated gradient blobs, Space Grotesk, mobile bottom-nav, toasts, fully responsive.
 
 ## Tech
 
 - **Backend:** Node.js + Express, JSON-file storage (`data/db.json`), scrypt password hashing, bearer-token sessions. Zero native deps.
-- **Rates:** `src/rates.js` — `https://open.er-api.com/v6/latest/USD`, 6h refresh, fallback table if offline.
 - **Frontend:** vanilla JS SPA (`public/`) — no build step.
 
 ## API sketch

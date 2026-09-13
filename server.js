@@ -3,10 +3,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   load, save, getDb, nextId, hashPassword, verifyPassword, newToken,
-  CURRENCIES, CATEGORIES, toUSD, fromUSD, round2, round4, todayStr, createDefaultAccount,
+  CURRENCIES, CATEGORIES, round2, todayStr, createDefaultAccount,
   reload as reloadStore, cloudMode, getStoreStatus, pendingWrites
 } from './src/store.js';
-import { startRateRefresh, getRates, isLive } from './src/rates.js';
 import { balanceUpToAccount, buildForecast, buildAlerts, chatReply } from './src/intelligence.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,7 +13,6 @@ const app = express();
 app.use(express.json());
 
 load();
-startRateRefresh();
 
 // cloud mode: pull the latest state from Redis before every API request, and
 // hold back the JSON response until the handler's write has actually landed —
@@ -65,12 +63,11 @@ const publicUser = (u) => ({
   currency: u.currency, createdAt: u.createdAt
 });
 
-// ---------- rates ----------
-
-app.get('/api/rates', (req, res) => {
-  const { rates, updatedAt } = getRates();
-  res.json({ base: 'USD', rates, updatedAt, live: isLive() });
-});
+function isValidDateString(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 
 // ---------- auth routes ----------
 
@@ -157,20 +154,6 @@ app.post('/api/me/password', auth, (req, res) => {
   res.json({ ok: true, message: 'Password updated ✅' });
 });
 
-// admin sets a new password for any user
-app.patch('/api/admin/users/:id/password', auth, adminOnly, (req, res) => {
-  const db = getDb();
-  const user = db.users.find((u) => u.id === Number(req.params.id));
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  const { newPassword } = req.body || {};
-  if (String(newPassword || '').length < 6) return res.status(400).json({ error: 'Password needs at least 6 characters' });
-  const { salt, hash } = hashPassword(String(newPassword));
-  user.salt = salt;
-  user.passHash = hash;
-  save();
-  res.json({ ok: true, message: `Password reset for ${user.name} ✅` });
-});
-
 // ---------- meta ----------
 
 app.get('/api/meta', (req, res) => {
@@ -185,15 +168,12 @@ app.get('/api/accounts', auth, (req, res) => {
   const accounts = db.accounts
     .filter((a) => a.userId === req.user.id)
     .map((a) => {
-      const usd = db.transactions
+      const balance = db.transactions
         .filter((t) => t.accountId === a.id && t.date <= today)
-        .reduce((s, t) => s + (t.type === 'income' ? t.usdAmount : -t.usdAmount), 0);
+        .reduce((s, t) => s + (t.type === 'income' ? t.amount : -t.amount), 0);
       return {
         ...a,
-        usdBalance: usd,
-        nativeBalance: round2(fromUSD(usd, a.currency)),
-        baseBalance: round2(fromUSD(usd, req.user.currency)),
-        ratePerUsd: getRates().rates[a.currency] || null
+        nativeBalance: round2(balance)
       };
     });
   res.json({ accounts });
@@ -224,9 +204,8 @@ app.delete('/api/accounts/:id', auth, (req, res) => {
 
 // ---------- summary / dashboard ----------
 
-const decorateTx = (req) => (t) => ({
+const decorateTx = () => (t) => ({
   ...t,
-  baseAmount: round2(fromUSD(t.usdAmount, req.user.currency)),
   isFuture: t.date > todayStr()
 });
 
@@ -234,43 +213,51 @@ app.get('/api/summary', auth, (req, res) => {
   const db = getDb();
   const today = todayStr();
   const txs = db.transactions.filter((t) => t.userId === req.user.id);
-  const base = (usd) => round2(fromUSD(usd, req.user.currency));
-
-  const settled = txs.filter((t) => t.date <= today);
-  const scheduled = txs.filter((t) => t.date > today);
-  const balance = settled.reduce((s, t) => s + (t.type === 'income' ? t.usdAmount : -t.usdAmount), 0);
+  const primaryTxs = txs.filter((t) => t.currency === req.user.currency);
+  const settled = primaryTxs.filter((t) => t.date <= today);
+  const scheduled = primaryTxs.filter((t) => t.date > today);
+  const sum = (items, type) => round2(items
+    .filter((t) => !type || t.type === type)
+    .reduce((total, item) => total + item.amount, 0));
+  const balance = round2(sum(settled, 'income') - sum(settled, 'expense'));
   const thisMonth = today.slice(0, 7);
   const unpaid = db.liabilities.filter((l) => l.userId === req.user.id && l.status === 'unpaid');
-  const schedIn = scheduled.filter((t) => t.type === 'income').reduce((s, t) => s + t.usdAmount, 0);
-  const schedOut = scheduled.filter((t) => t.type === 'expense').reduce((s, t) => s + t.usdAmount, 0);
+  const primaryUnpaid = unpaid.filter((l) => l.currency === req.user.currency);
 
   const accounts = db.accounts.filter((a) => a.userId === req.user.id).map((a) => {
-    const usd = settled.filter((t) => t.accountId === a.id)
-      .reduce((s, t) => s + (t.type === 'income' ? t.usdAmount : -t.usdAmount), 0);
+    const accountTxs = txs.filter((t) => t.accountId === a.id && t.date <= today);
     return {
-      id: a.id, name: a.name, currency: a.currency,
-      usdBalance: usd,
-      nativeBalance: round2(fromUSD(usd, a.currency)),
-      baseBalance: base(usd)
+      id: a.id,
+      name: a.name,
+      currency: a.currency,
+      nativeBalance: round2(sum(accountTxs, 'income') - sum(accountTxs, 'expense'))
     };
   });
 
+  const liabilityTotals = Object.values(unpaid.reduce((totals, l) => {
+    const group = totals[l.currency] ||= { currency: l.currency, amount: 0, count: 0 };
+    group.amount += l.amount;
+    group.count += 1;
+    return totals;
+  }, {})).map((group) => ({ ...group, amount: round2(group.amount) }));
+
   res.json({
     baseCurrency: req.user.currency,
-    balance: base(balance),
-    incomeAll: base(settled.filter((t) => t.type === 'income').reduce((s, t) => s + t.usdAmount, 0)),
-    expenseAll: base(settled.filter((t) => t.type === 'expense').reduce((s, t) => s + t.usdAmount, 0)),
-    incomeThisMonth: base(settled.filter((t) => t.type === 'income' && t.date.slice(0, 7) === thisMonth).reduce((s, t) => s + t.usdAmount, 0)),
-    expenseThisMonth: base(settled.filter((t) => t.type === 'expense' && t.date.slice(0, 7) === thisMonth).reduce((s, t) => s + t.usdAmount, 0)),
-    liabilitiesUnpaid: base(unpaid.reduce((s, l) => s + l.usdAmount, 0)),
+    balance,
+    incomeAll: sum(settled, 'income'),
+    expenseAll: sum(settled, 'expense'),
+    incomeThisMonth: sum(settled.filter((t) => t.date.slice(0, 7) === thisMonth), 'income'),
+    expenseThisMonth: sum(settled.filter((t) => t.date.slice(0, 7) === thisMonth), 'expense'),
+    liabilitiesUnpaid: round2(primaryUnpaid.reduce((total, item) => total + item.amount, 0)),
     liabilitiesCount: unpaid.length,
-    scheduledIn: base(schedIn),
-    scheduledOut: base(schedOut),
-    projected: base(balance + schedIn - schedOut),
+    liabilityTotals,
+    scheduledIn: sum(scheduled, 'income'),
+    scheduledOut: sum(scheduled, 'expense'),
+    projected: round2(balance + sum(scheduled, 'income') - sum(scheduled, 'expense')),
     accounts,
     alerts: buildAlerts(req.user.id),
-    recent: txs.slice().sort((a, b) => (b.date + b.id).localeCompare(a.date + a.id)).slice(0, 8).map(decorateTx(req)),
-    scheduledTx: scheduled.sort((a, b) => a.date.localeCompare(b.date)).slice(0, 6).map(decorateTx(req))
+    recent: txs.slice().sort((a, b) => (b.date + b.id).localeCompare(a.date + a.id)).slice(0, 8).map(decorateTx()),
+    scheduledTx: scheduled.sort((a, b) => a.date.localeCompare(b.date)).slice(0, 6).map(decorateTx())
   });
 });
 
@@ -295,23 +282,22 @@ app.get('/api/transactions', auth, (req, res) => {
 app.post('/api/transactions', auth, (req, res) => {
   const { type, amount, accountId, category, date, note } = req.body || {};
   const amt = Number(amount);
+  const normalizedAmount = round2(amt);
   const db = getDb();
 
   if (!['income', 'expense'].includes(type)) return res.status(400).json({ error: 'Type must be income or expense' });
-  if (!amt || amt <= 0) return res.status(400).json({ error: 'Amount must be a positive number' });
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return res.status(400).json({ error: 'Pick a valid date' });
+  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) return res.status(400).json({ error: 'Amount must be a finite positive number of at least 0.01' });
+  if (!isValidDateString(date)) return res.status(400).json({ error: 'Pick a valid date' });
   if (date > todayStr()) return res.status(400).json({ error: "Dates can't be in the future — pick today or earlier 📅" });
 
   const account = db.accounts.find((a) => a.id === Number(accountId) && a.userId === req.user.id);
   if (!account) return res.status(400).json({ error: 'Pick one of your wallets' });
 
-  const usdAmount = round4(toUSD(amt, account.currency));
-
   // 🚫 over-balance guard: this wallet's balance as of the entry date can't go negative
   if (type === 'expense') {
-    const projected = balanceUpToAccount(account.id, date) - usdAmount;
+    const projected = balanceUpToAccount(account.id, date) - normalizedAmount;
     if (projected < -0.0001) {
-      const shortfall = round2(fromUSD(-projected, account.currency));
+      const shortfall = round2(-projected);
       return res.status(400).json({
         error: `Nope 💸 "${account.name}" would go negative by ${shortfall} ${account.currency}. Add income to that wallet first.`
       });
@@ -323,9 +309,8 @@ app.post('/api/transactions', auth, (req, res) => {
     userId: req.user.id,
     accountId: account.id,
     type,
-    amount: round2(amt),
+    amount: normalizedAmount,
     currency: account.currency,
-    usdAmount,
     category: category || (type === 'income' ? 'Other Income' : 'Other'),
     date,
     note: String(note || '').slice(0, 140),
@@ -340,6 +325,20 @@ app.delete('/api/transactions/:id', auth, (req, res) => {
   const db = getDb();
   const idx = db.transactions.findIndex((t) => t.id === Number(req.params.id) && t.userId === req.user.id);
   if (idx === -1) return res.status(404).json({ error: 'Transaction not found' });
+  const transaction = db.transactions[idx];
+  const linkedLiability = db.liabilities.find((l) => l.linkedTransactionId === transaction.id);
+  if (linkedLiability) {
+    return res.status(400).json({ error: 'This payment belongs to a liability. Undo or delete the liability instead.' });
+  }
+  if (transaction.type === 'income') {
+    const affectedDates = [...new Set(db.transactions
+      .filter((t) => t.accountId === transaction.accountId && t.id !== transaction.id && t.date >= transaction.date)
+      .map((t) => t.date))].sort();
+    const negativeDate = affectedDates.find((date) => balanceUpToAccount(transaction.accountId, date, transaction.id) < -0.0001);
+    if (negativeDate) {
+      return res.status(400).json({ error: `Can't delete this income because the wallet would go negative on ${negativeDate}. Delete later expenses first.` });
+    }
+  }
   db.transactions.splice(idx, 1);
   save();
   res.json({ ok: true });
@@ -353,7 +352,6 @@ app.get('/api/liabilities', auth, (req, res) => {
     .filter((l) => l.userId === req.user.id)
     .map((l) => ({
       ...l,
-      baseAmount: round2(fromUSD(l.usdAmount, req.user.currency)),
       nativeAmount: round2(l.amount),
       daysLeft: Math.round((new Date(l.dueDate) - new Date(todayStr())) / 86400000)
     }))
@@ -364,9 +362,10 @@ app.get('/api/liabilities', auth, (req, res) => {
 app.post('/api/liabilities', auth, (req, res) => {
   const { name, amount, accountId, dueDate } = req.body || {};
   const amt = Number(amount);
+  const normalizedAmount = round2(amt);
   const db = getDb();
-  if (!name || !amt || amt <= 0) return res.status(400).json({ error: 'Name and a positive amount are required' });
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate || '')) return res.status(400).json({ error: 'Pick a valid due date' });
+  if (!name || !Number.isFinite(normalizedAmount) || normalizedAmount <= 0) return res.status(400).json({ error: 'Name and a finite positive amount of at least 0.01 are required' });
+  if (!isValidDateString(dueDate)) return res.status(400).json({ error: 'Pick a valid due date' });
   const account = db.accounts.find((a) => a.id === Number(accountId) && a.userId === req.user.id);
   if (!account) return res.status(400).json({ error: 'Pick one of your wallets' });
   const liab = {
@@ -374,9 +373,8 @@ app.post('/api/liabilities', auth, (req, res) => {
     userId: req.user.id,
     accountId: account.id,
     name: String(name).trim().slice(0, 80),
-    amount: round2(amt),
+    amount: normalizedAmount,
     currency: account.currency,
-    usdAmount: round4(toUSD(amt, account.currency)),
     dueDate,
     status: 'unpaid',
     linkedTransactionId: null,
@@ -396,7 +394,7 @@ app.patch('/api/liabilities/:id', auth, (req, res) => {
 
   if (status === 'paid' && liab.status !== 'paid') {
     const today = todayStr();
-    const projected = balanceUpToAccount(liab.accountId, today) - liab.usdAmount;
+    const projected = balanceUpToAccount(liab.accountId, today) - liab.amount;
     if (projected < -0.0001) {
       const acc = db.accounts.find((a) => a.id === liab.accountId);
       return res.status(400).json({ error: `Not enough balance in "${acc?.name || 'that wallet'}" to pay this off.` });
@@ -408,7 +406,6 @@ app.patch('/api/liabilities/:id', auth, (req, res) => {
       type: 'expense',
       amount: liab.amount,
       currency: liab.currency,
-      usdAmount: liab.usdAmount,
       category: 'Liability',
       date: today,
       note: `Paid: ${liab.name}`,
@@ -517,10 +514,8 @@ const PORT = process.env.PORT || 3000;
 // on Vercel the app is exported as a serverless handler — no listen() there
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
-    const { updatedAt, live } = getRates();
     console.log(`\n  ✦ Expenzo running →  http://localhost:${PORT}`);
-    console.log(`  ✦ FX rates: ${live ? 'LIVE (open.er-api.com)' : 'offline fallback'} · updated ${new Date(updatedAt).toLocaleString()}`);
-    console.log(`  ✦ admin login: ${process.env.ADMIN_EMAIL || 'habibullahanoosha2019@gmail.com'}`);
+    console.log(`  ✦ admin login: ${process.env.ADMIN_EMAIL || 'existing database administrator'}`);
     console.log(`  ✦ storage: ${cloudMode ? 'Upstash Redis (cloud)' : 'local JSON file'}\n`);
   });
 }

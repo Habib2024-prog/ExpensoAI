@@ -358,9 +358,6 @@ input[type=date] { color-scheme: dark; }
 .csel-it small { color: var(--muted); font-size: 11px; }
 .csel-check { color: var(--fuchsia); font-weight: 800; }
 
-/* ---------- rate ticker ---------- */
-.rate-ticker { font-size: 12px; padding: 9px 14px; cursor: default; white-space: nowrap; }
-
 /* ---------- wallet cards ---------- */
 .acc-card { position: relative; }
 .acc-card .amt { font-family: var(--font-head); font-size: 24px; font-weight: 700; margin: 8px 0 2px; }
@@ -390,7 +387,6 @@ input[type=date] { color-scheme: dark; }
 
   .topbar h2 { font-size: 22px; }
   .top-actions { width: 100%; justify-content: flex-end; }
-  .rate-ticker { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; justify-content: flex-start; font-size: 11.5px; }
 
   .main { padding: 16px 14px 110px; }
   .sec-head h3 { font-size: 16px; }
@@ -421,7 +417,6 @@ input[type=date] { color-scheme: dark; }
 @media (max-width: 940px) {
   .shell { grid-template-columns: minmax(0, 1fr); }
   .main { min-width: 0; max-width: 100%; overflow-x: clip; }
-  .rate-ticker { white-space: nowrap; }
 }
 @media (max-width: 640px) {
   .stat .k { font-size: 10px; letter-spacing: .04em; }

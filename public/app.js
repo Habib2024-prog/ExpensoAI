@@ -4,7 +4,6 @@ const state = {
   token: localStorage.getItem('expenzo_token') || null,
   user: null,
   meta: null,          // { currencies, categories }
-  rates: null,         // { base, rates, updatedAt, live }
   accounts: [],
   txType: 'expense',
   txAccount: null,
@@ -40,7 +39,6 @@ function toast(msg, kind = '') {
 
 // ---------- formatting ----------
 const curOf = (code) => state.meta?.currencies?.[code] || { symbol: code + ' ' };
-const rateOf = (code) => state.rates?.rates?.[code] || null;
 function fmtBase(usd) {
   const c = curOf(state.user.currency);
   return c.symbol + (usd).toLocaleString('en-US', { maximumFractionDigits: 2 });
@@ -153,7 +151,19 @@ $('#registerForm').addEventListener('submit', async (e) => {
 
 async function logout() { try { await api('/logout', { method: 'POST' }); } catch {} doLogout(); }
 function doLogout() {
-  state.token = null; state.user = null; state.accounts = [];
+  state.token = null;
+  state.user = null;
+  state.accounts = [];
+  state.chat = [];
+  state.txAccount = null;
+  state.txCategory = null;
+  state.liabAccount = null;
+  txAccountSel = null;
+  txCategorySel = null;
+  liabAccountSel = null;
+  acCurrencySel = null;
+  window.__alerts = null;
+  window.__summary = null;
   localStorage.removeItem('expenzo_token');
   $('#appView').classList.remove('on');
   $('#authView').style.display = 'grid';
@@ -162,9 +172,7 @@ function doLogout() {
 // ================= BOOT =================
 async function boot() {
   state.meta = await fetch('/api/meta').then((r) => r.json());
-  state.rates = await fetch('/api/rates').then((r) => r.json()).catch(() => null);
   renderRegCurrency();
-  renderRateTicker();
 
   if (state.token) {
     try {
@@ -179,33 +187,12 @@ async function boot() {
 function renderRegCurrency() {
   customSelect($('#rg_currency'), {
     options: Object.entries(state.meta.currencies).map(([code, c]) => ({
-      value: code, label: `${code} — ${c.name}`, icon: c.symbol, sub: rateOf(code) ? `1 USD = ${rateOf(code).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${code}` : ''
+      value: code, label: `${code} — ${c.name}`, icon: c.symbol
     })),
     value: state.regCurrency,
     onChange: (v) => { state.regCurrency = v; }
   });
 }
-
-function renderRateTicker() {
-  const el = $('#rateTicker');
-  if (!state.rates) { el.textContent = '🪙 rates offline'; return; }
-  const upd = new Date(state.rates.updatedAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-  const f = (n) => n.toLocaleString('en-US', { maximumFractionDigits: 2 });
-  // compact text on small screens so the top bar never overflows
-  const narrow = window.innerWidth <= 700;
-  let txt;
-  if (state.user && state.user.currency !== 'USD') {
-    const r = rateOf(state.user.currency);
-    txt = r ? `🪙 1 USD = ${f(r)} ${state.user.currency}` : '🪙 live rates';
-  } else if (narrow) {
-    txt = `🪙 1 USD = ${f(rateOf('AFN'))} AFN · ${f(rateOf('PKR'))} PKR`;
-  } else {
-    txt = `🪙 1 USD = ${f(rateOf('AFN'))} AFN · ${f(rateOf('PKR'))} PKR · ${f(rateOf('EUR'))} EUR`;
-  }
-  el.innerHTML = `${esc(txt)}${state.rates.live ? '' : ' (offline)'}`;
-  el.title = `live exchange rates${state.rates.live ? '' : ' (offline fallback)'} · updated ${upd}`;
-}
-window.addEventListener('resize', () => { if (state.user) renderRateTicker(); });
 
 async function enterApp(user) {
   state.user = user;
@@ -221,18 +208,15 @@ async function enterApp(user) {
   $('#mAvatar').textContent = user.name[0].toUpperCase();
   $('#navAdmin').style.display = user.role === 'admin' ? '' : 'none';
   $('#navAdminBottom').style.display = user.role === 'admin' ? '' : 'none';
-  await refreshRatesBadge();
-  renderRateTicker();
+  await refreshAccounts();
   if (!location.hash || location.hash === '#/') location.hash = '#/dashboard';
   route();
   refreshBadges();
   setInterval(refreshBadges, 60000);
-  setInterval(() => api('/rates').then((r) => { state.rates = r; renderRateTicker(); }).catch(() => {}), 600000);
 }
 
-async function refreshRatesBadge() {
+async function refreshAccounts() {
   try {
-    state.rates = await api('/rates');
     const accs = await api('/accounts');
     state.accounts = accs.accounts;
   } catch {}
@@ -300,7 +284,7 @@ async function renderDashboard() {
   const [s, f] = await Promise.all([api('/summary'), api('/forecast')]);
   state.accounts = s.accounts;
   const months = [...f.history.slice(-5), ...(f.future.slice(0, 1))];
-  const maxBar = Math.max(...months.map((m) => Math.max(m.expenseBase, 1)), 1);
+  const maxBar = Math.max(...months.map((m) => Math.max(m.expense, 1)), 1);
 
   const accCard = (a) => `
     <div class="card acc-card">
@@ -309,8 +293,7 @@ async function renderDashboard() {
         <span class="pill cyan">${a.currency}</span>
       </div>
       <div class="amt">${fmtNative(a.nativeBalance, a.currency)}</div>
-      <div class="due">≈ ${fmtBase(a.baseBalance)} · ${state.user.currency} eq.</div>
-      ${a.currency !== state.user.currency && rateOf(a.currency) ? `<div class="due" style="margin-top:4px">🪙 1 USD = ${rateOf(a.currency).toLocaleString('en-US', { maximumFractionDigits: 2 })} ${a.currency}</div>` : ''}
+      <div class="due">Balance kept in ${a.currency} only</div>
       ${state.accounts.length > 1 ? `<button class="icon-btn acc-del" title="delete wallet" onclick="delAccount(${a.id})">🗑</button>` : ''}
     </div>`;
 
@@ -334,14 +317,18 @@ async function renderDashboard() {
     </div>`;
   };
 
+  const liabilitySummary = s.liabilityTotals.length
+    ? s.liabilityTotals.map((group) => fmtNative(group.amount, group.currency)).join(' · ')
+    : fmtNative(0, state.user.currency);
+
   $('#view-dashboard').innerHTML = `
     <div class="grid cols-4 fade-in">
       <div class="card glow hero-bal">
-        <div class="lbl">Total balance · across ${s.accounts.length} wallet${s.accounts.length !== 1 ? 's' : ''}</div>
+        <div class="lbl">${state.user.currency} balance · ${s.accounts.filter((a) => a.currency === state.user.currency).length} wallet${s.accounts.filter((a) => a.currency === state.user.currency).length !== 1 ? 's' : ''}</div>
         <div class="amount grad-text">${fmtBase(s.balance)}</div>
-        <div class="proj">in ${state.user.currency} · live rates${s.scheduledIn || s.scheduledOut ? ` · scheduled legacy entries: ${fmtBase(s.scheduledIn)} in / ${fmtBase(s.scheduledOut)} out` : ''}</div>
+        <div class="proj">Other currency wallets stay separate${s.scheduledIn || s.scheduledOut ? ` · scheduled: ${fmtBase(s.scheduledIn)} in / ${fmtBase(s.scheduledOut)} out` : ''}</div>
         <div class="spark">${months.map((m) => `
-          <div class="bar-w"><div class="bar" style="height:${Math.max(6, (m.expenseBase / maxBar) * 100)}%" title="${m.label}: ${fmtBase(m.expenseBase)} spent"></div><div class="bl">${m.label.split(' ')[0]}</div></div>`).join('')}
+          <div class="bar-w"><div class="bar" style="height:${Math.max(6, (m.expense / maxBar) * 100)}%" title="${m.label}: ${fmtBase(m.expense)} spent"></div><div class="bl">${m.label.split(' ')[0]}</div></div>`).join('')}
         </div>
       </div>
       <div class="card stat"><div class="top"><span class="k">Income · this month</span><span class="ico">💰</span></div>
@@ -365,9 +352,9 @@ async function renderDashboard() {
         <div class="sec-head" style="margin-top:0"><h3>Money you owe</h3></div>
         <div class="card stat fade-in" style="gap:10px">
           <div class="top"><span class="k">Unpaid liabilities</span><span class="ico">🧾</span></div>
-          <div class="v" style="color:var(--amber)">${fmtBase(s.liabilitiesUnpaid)}</div>
+          <div class="v" style="color:var(--amber)">${liabilitySummary}</div>
           <div class="d">${s.liabilitiesCount} open · <a class="lnk" href="#/liabilities" style="color:#c4b5fd">manage →</a></div>
-          <div class="d">avg monthly spending ${fmtBase(f.monthlyAvgExpense)} · projected next month ${fmtBase(f.nextMonth.expense)}</div>
+          <div class="d">${state.user.currency} wallets: avg monthly spending ${fmtBase(f.monthlyAvgExpense)} · projected next month ${fmtBase(f.nextMonth.expense)}</div>
         </div>
       </div>
     </div>
@@ -391,22 +378,12 @@ function openAccountModal() {
   const firstFree = Object.keys(state.meta.currencies).find((c) => !used.has(c)) || state.user.currency;
   acCurrencySel = customSelect($('#ac_currency'), {
     options: Object.entries(state.meta.currencies).map(([code, c]) => ({
-      value: code, label: `${code} — ${c.name}`, icon: c.symbol,
-      sub: rateOf(code) ? `1 USD = ${rateOf(code).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${code}` : ''
+      value: code, label: `${code} — ${c.name}`, icon: c.symbol
     })),
-    value: firstFree,
-    onChange: (v) => updateAccountRateHint(v)
+    value: firstFree
   });
-  updateAccountRateHint(firstFree);
   $('#accountModal').classList.add('on');
   $('#ac_name').focus();
-}
-function updateAccountRateHint(code) {
-  const c = code || acCurrencySel?.value || state.user.currency;
-  const r = rateOf(c);
-  $('#ac_rateHint').innerHTML = r
-    ? `🪙 live rate: <b>1 USD = ${r.toLocaleString('en-US', { maximumFractionDigits: 4 })} ${c}</b>${c === state.user.currency ? ' · same as your base currency' : ` · converted to ${state.user.currency} for your total`}`
-    : '';
 }
 
 async function saveAccount() {
@@ -414,7 +391,7 @@ async function saveAccount() {
     await api('/accounts', { method: 'POST', body: { name: $('#ac_name').value, currency: acCurrencySel?.value } });
     closeModal('accountModal');
     $('#ac_name').value = '';
-    await refreshRatesBadge();
+    await refreshAccounts();
     toast('wallet created 🪙 it shows up on your dashboard now', 'ok');
     route();
   } catch (e) { toast(esc(e.message), 'err'); }
@@ -422,7 +399,7 @@ async function saveAccount() {
 
 async function delAccount(id) {
   if (!confirm('Delete this wallet?')) return;
-  try { await api('/accounts/' + id, { method: 'DELETE' }); await refreshRatesBadge(); toast('wallet deleted', 'ok'); route(); }
+  try { await api('/accounts/' + id, { method: 'DELETE' }); await refreshAccounts(); toast('wallet deleted', 'ok'); route(); }
   catch (e) { toast(esc(e.message), 'err'); }
 }
 
@@ -445,7 +422,7 @@ async function renderTransactions() {
     <div class="card tbl-wrap fade-in">
       ${transactions.length ? `
       <table class="tbl">
-        <thead><tr><th>Date</th><th>Type</th><th>Wallet</th><th>Category</th><th>Note</th><th class="right">Amount</th><th class="right">≈ ${state.user.currency}</th><th></th></tr></thead>
+        <thead><tr><th>Date</th><th>Type</th><th>Wallet</th><th>Category</th><th>Note</th><th class="right">Amount</th><th></th></tr></thead>
         <tbody>${transactions.map((t) => {
           const acc = state.accounts.find((a) => a.id === t.accountId);
           return `
@@ -456,7 +433,6 @@ async function renderTransactions() {
             <td>${esc(t.category)}</td>
             <td style="color:var(--muted)">${esc(t.note || '—')}</td>
             <td class="right mono" style="font-weight:700;color:var(--text)">${t.type === 'income' ? '+' : '−'}${fmtNative(t.amount, t.currency)}</td>
-            <td class="right mono" style="color:var(--muted)">${t.type === 'income' ? '+' : '−'}${fmtBase(t.baseAmount)}</td>
             <td><div class="row-actions"><button class="icon-btn" title="delete" onclick="delTx(${t.id})">🗑</button></div></td>
           </tr>`;
         }).join('')}</tbody>
@@ -468,8 +444,8 @@ async function renderTransactions() {
 let txAccountSel = null, txCategorySel = null;
 
 async function openTxModal() {
-  await refreshRatesBadge();
-  setTxType(state.txType || 'expense', true);
+  await refreshAccounts();
+  setTxType(state.txType || 'expense');
   $('#tx_date').value = todayStr();
   $('#tx_date').max = todayStr();
   $('#txModal').classList.add('on');
@@ -511,8 +487,7 @@ async function updateBalanceHint() {
   try {
     const acc = state.accounts.find((a) => a.id === Number(txAccountSel?.value ?? state.txAccount));
     if (!acc) { $('#tx_balanceHint').textContent = ''; return; }
-    const r = rateOf(acc.currency);
-    $('#tx_balanceHint').innerHTML = `<b style="color:var(--green)">${esc(acc.name)}</b> has <b style="color:var(--green)">${fmtNative(acc.nativeBalance, acc.currency)}</b> · entries save in <b>${acc.currency}</b>${r && acc.currency !== 'USD' ? ` · 1 USD = ${r.toLocaleString('en-US', { maximumFractionDigits: 2 })} ${acc.currency}` : ''} · expenses can't overdraw the wallet 🚫`;
+    $('#tx_balanceHint').innerHTML = `<b style="color:var(--green)">${esc(acc.name)}</b> has <b style="color:var(--green)">${fmtNative(acc.nativeBalance, acc.currency)}</b> · entries save in <b>${acc.currency}</b> · expenses can't overdraw the wallet 🚫`;
   } catch {}
 }
 document.addEventListener('change', (e) => { if (e.target.id === 'tx_date') { /* max already enforced */ } });
@@ -545,7 +520,7 @@ async function delTx(id) {
 let liabAccountSel = null;
 
 async function renderLiabilities() {
-  await refreshRatesBadge();
+  await refreshAccounts();
   const { liabilities } = await api('/liabilities');
   const accName = (id) => state.accounts.find((a) => a.id === id)?.name || 'wallet';
   const card = (l) => {
@@ -631,14 +606,14 @@ async function renderForecast() {
   const f = await api('/forecast');
   const all = [...f.history, ...f.future];
   const W = 760, H = 300, pad = { l: 56, r: 16, t: 18, b: 34 };
-  const maxV = Math.max(...all.map((m) => Math.max(m.incomeBase, m.expenseBase)), 1) * 1.15;
+  const maxV = Math.max(...all.map((m) => Math.max(m.income, m.expense)), 1) * 1.15;
   const n = all.length;
   const x = (i) => pad.l + (i / (n - 1)) * (W - pad.l - pad.r);
   const y = (v) => pad.t + (1 - v / maxV) * (H - pad.t - pad.b);
 
   const line = (key) => {
-    const hist = all.map((m, i) => ({ i, v: m[key + 'Base'], proj: !!m.projected })).filter((p) => !p.proj);
-    const full = all.map((m, i) => ({ i, v: m[key + 'Base'], proj: !!m.projected }));
+    const hist = all.map((m, i) => ({ i, v: m[key], proj: !!m.projected })).filter((p) => !p.proj);
+    const full = all.map((m, i) => ({ i, v: m[key], proj: !!m.projected }));
     const pts = (arr) => arr.map((p) => `${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
     let path = `<polyline points="${pts(hist)}" fill="none" stroke="url(#lg${key})" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;
     const joint = hist.slice(-1).concat(full.filter((p) => p.proj));
@@ -657,8 +632,8 @@ async function renderForecast() {
   const labels = all.map((m, i) => `<text x="${x(i)}" y="${H - 10}" fill="#9d9cb5" font-size="10" text-anchor="middle">${m.label.split(' ')[0]}</text>`).join('');
 
   const catBars = f.nextMonth.byCategory.slice(0, 6).map((c) => {
-    const pct = (c.usd / Math.max(f.nextMonth.expense, 1)) * 100;
-    return `<div class="catbar"><div class="row1"><b>${esc(c.category)}</b><span class="mono">~${fmtBase(c.usd)}</span></div>
+    const pct = (c.amount / Math.max(f.nextMonth.expense, 1)) * 100;
+    return `<div class="catbar"><div class="row1"><b>${esc(c.category)}</b><span class="mono">~${fmtBase(c.amount)}</span></div>
       <div class="track"><div class="fill" style="width:${Math.max(3, pct)}%"></div></div></div>`;
   }).join('');
 
@@ -670,7 +645,7 @@ async function renderForecast() {
         <div class="d">avg monthly spend ${fmtBase(f.monthlyAvgExpense)}</div></div>
     </div>
     <div class="card fade-in">
-      <h3 style="margin-bottom:6px">Cash-flow trend & projection <span class="pill gray" style="margin-left:6px">in ${state.user.currency} · live rates</span></h3>
+      <h3 style="margin-bottom:6px">Cash-flow trend & projection <span class="pill gray" style="margin-left:6px">${state.user.currency} wallets only</span></h3>
       <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" preserveAspectRatio="xMidYMid meet">
         <defs>
           <linearGradient id="lgincome" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#67e8f9"/></linearGradient>
@@ -693,10 +668,10 @@ async function renderForecast() {
       <div class="card fade-in"><h3 style="margin-bottom:12px">3-month outlook</h3>
         <table class="tbl"><thead><tr><th>Month</th><th class="right">Income</th><th class="right">Spending</th><th class="right">Net</th></tr></thead>
         <tbody>${f.future.map((m) => `<tr><td>${esc(m.label)}</td>
-          <td class="right mono" style="color:var(--green)">+${fmtBase(m.incomeBase)}</td>
-          <td class="right mono" style="color:var(--red)">−${fmtBase(m.expenseBase)}</td>
+          <td class="right mono" style="color:var(--green)">+${fmtBase(m.income)}</td>
+          <td class="right mono" style="color:var(--red)">−${fmtBase(m.expense)}</td>
           <td class="right mono" style="font-weight:700;color:${m.net >= 0 ? 'var(--green)' : 'var(--red)'}">${m.net >= 0 ? '+' : ''}${fmtBase(m.net)}</td></tr>`).join('')}</tbody></table>
-        <div style="font-size:12px;color:var(--muted);margin-top:10px">all wallets converted at live rates 🪙</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:10px">Other currency wallets are kept separate.</div>
       </div>
     </div>`;
 }
@@ -773,7 +748,6 @@ async function renderAdmin() {
           ${u.status !== 'active' ? `<button class="btn sm" onclick="setUserStatus(${u.id},'active')">Verify ✓</button>` : ''}
           ${u.status === 'active' && u.role !== 'admin' ? `<button class="btn sm ghost" onclick="setUserStatus(${u.id},'rejected')">Reject</button>` : ''}
           ${u.status === 'pending' ? `<button class="btn sm ghost" onclick="setUserStatus(${u.id},'rejected')">Reject</button>` : ''}
-          <button class="icon-btn" title="set new password" onclick="resetUserPassword(${u.id})">🔑</button>
           ${u.role !== 'admin' ? `<button class="icon-btn" title="delete user" onclick="delUser(${u.id})">🗑</button>` : ''}
         </div></td>
       </tr>`;
@@ -835,16 +809,6 @@ async function savePassword() {
   try {
     const r = await api('/me/password', { method: 'POST', body: { currentPassword: current, newPassword: next } });
     closeModal('passModal');
-    toast(esc(r.message), 'ok');
-  } catch (e) { toast(esc(e.message), 'err'); }
-}
-
-// admin sets a user's password
-async function resetUserPassword(id) {
-  const np = prompt('Set a new password for this user (6+ chars):');
-  if (np === null) return;
-  try {
-    const r = await api(`/admin/users/${id}/password`, { method: 'PATCH', body: { newPassword: np } });
     toast(esc(r.message), 'ok');
   } catch (e) { toast(esc(e.message), 'err'); }
 }

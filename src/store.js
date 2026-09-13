@@ -1,16 +1,15 @@
+import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { toUSD, fromUSD } from './rates.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 
-export { toUSD, fromUSD };
-
-// static display metadata (symbols/names); numeric rates come from src/rates.js
+// Static display metadata. Amounts are stored and displayed in each wallet's
+// original currency; no exchange-rate conversion is used.
 export const CURRENCIES = {
   USD: { name: 'US Dollar', symbol: '$' },
   AFN: { name: 'Afghan Afghani', symbol: '؋' },
@@ -98,6 +97,7 @@ export async function reload() {
     if (raw) {
       const fresh = JSON.parse(raw);
       for (const k of Object.keys(db)) db[k] = fresh[k] ?? emptyDb()[k];
+      migrate();
     } else if (!db.users.length) {
       seed();
       await writeCloud();
@@ -163,6 +163,21 @@ function migrate() {
       touched = true;
     }
   }
+  // Previous versions stored a derived USD value beside the original amount.
+  // The original amount is now the sole ledger value, which keeps balances
+  // stable when external exchange rates change.
+  for (const transaction of db.transactions) {
+    if ('usdAmount' in transaction) {
+      delete transaction.usdAmount;
+      touched = true;
+    }
+  }
+  for (const liability of db.liabilities) {
+    if ('usdAmount' in liability) {
+      delete liability.usdAmount;
+      touched = true;
+    }
+  }
   if (touched) save();
 }
 
@@ -205,16 +220,21 @@ export function createDefaultAccount(userId, currency, name = 'Main') {
 }
 
 function seed() {
-  // the site owner — no demo accounts. override via env vars on your host.
-  const email = process.env.ADMIN_EMAIL || 'habibullahanoosha2019@gmail.com';
-  const password = process.env.ADMIN_PASSWORD || 'Anoosha0101';
+  const email = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+  const password = String(process.env.ADMIN_PASSWORD || '');
+  if (!email || !password) {
+    throw new Error('ADMIN_EMAIL and ADMIN_PASSWORD are required when creating the first administrator');
+  }
+  if (password.length < 12) {
+    throw new Error('ADMIN_PASSWORD must contain at least 12 characters');
+  }
   const name = process.env.ADMIN_NAME || 'Khaliqyar';
   const currency = process.env.ADMIN_CURRENCY || 'PKR';
   const { salt, hash } = hashPassword(password);
   const admin = {
     id: nextId('user'),
     name,
-    email: email.toLowerCase(),
+    email,
     passHash: hash,
     salt,
     role: 'admin',

@@ -1,321 +1,201 @@
-import { getDb, CURRENCIES, fromUSD, round2, todayStr } from './store.js';
-
-// ---------- helpers ----------
+import { getDb, CURRENCIES, round2, todayStr } from './store.js';
 
 const monthKey = (dateStr) => dateStr.slice(0, 7);
 
 function monthLabel(key) {
-  const [y, m] = key.split('-').map(Number);
-  return new Date(y, m - 1, 1).toLocaleString('en-US', { month: 'short', year: '2-digit' });
+  const [year, month] = key.split('-').map(Number);
+  return new Date(year, month - 1, 1).toLocaleString('en-US', { month: 'short', year: '2-digit' });
 }
 
 function userTransactions(userId) {
-  return getDb().transactions.filter((t) => t.userId === userId);
+  return getDb().transactions.filter((transaction) => transaction.userId === userId);
 }
 
 function userLiabilities(userId) {
-  return getDb().liabilities.filter((l) => l.userId === userId);
+  return getDb().liabilities.filter((liability) => liability.userId === userId);
 }
+
+function currencyTransactions(userId, currency) {
+  return userTransactions(userId).filter((transaction) => transaction.currency === currency);
+}
+
+const amountFor = (items, type) => round2(items
+  .filter((item) => !type || item.type === type)
+  .reduce((total, item) => total + item.amount, 0));
 
 export function balanceUpTo(userId, dateStr, excludeTxId = null) {
-  let bal = 0;
-  for (const t of userTransactions(userId)) {
-    if (excludeTxId && t.id === excludeTxId) continue;
-    if (t.date <= dateStr) bal += t.type === 'income' ? t.usdAmount : -t.usdAmount;
+  let balance = 0;
+  for (const transaction of userTransactions(userId)) {
+    if (excludeTxId && transaction.id === excludeTxId) continue;
+    if (transaction.date <= dateStr) balance += transaction.type === 'income' ? transaction.amount : -transaction.amount;
   }
-  return round2(bal);
+  return round2(balance);
 }
 
+// Each account contains exactly one currency, so its balance cannot move with
+// exchange-rate changes.
 export function balanceUpToAccount(accountId, dateStr, excludeTxId = null) {
-  let bal = 0;
-  for (const t of getDb().transactions.filter((t) => t.accountId === accountId)) {
-    if (excludeTxId && t.id === excludeTxId) continue;
-    if (t.date <= dateStr) bal += t.type === 'income' ? t.usdAmount : -t.usdAmount;
+  let balance = 0;
+  for (const transaction of getDb().transactions.filter((item) => item.accountId === accountId)) {
+    if (excludeTxId && transaction.id === excludeTxId) continue;
+    if (transaction.date <= dateStr) balance += transaction.type === 'income' ? transaction.amount : -transaction.amount;
   }
-  return round2(bal);
+  return round2(balance);
 }
 
 function accountBalances(userId) {
   const db = getDb();
-  return db.accounts
-    .filter((a) => a.userId === userId)
-    .map((a) => {
-      const bal = db.transactions
-        .filter((t) => t.accountId === a.id && t.date <= todayStr())
-        .reduce((s, t) => s + (t.type === 'income' ? t.usdAmount : -t.usdAmount), 0);
-      return { ...a, usd: round2(bal), native: round2(fromUSD(bal, a.currency)) };
-    });
+  return db.accounts.filter((account) => account.userId === userId).map((account) => {
+    const transactions = db.transactions.filter((transaction) => transaction.accountId === account.id && transaction.date <= todayStr());
+    return { ...account, native: round2(amountFor(transactions, 'income') - amountFor(transactions, 'expense')) };
+  });
 }
-
-// ---------- forecasting ----------
 
 function linearForecast(points, ahead) {
-  // points: [{x, y}] least-squares line + damped trend projection
-  const n = points.length;
-  if (n === 0) return Array(ahead).fill(0);
-  if (n === 1) return Array(ahead).fill(round2(points[0].y));
-  const meanX = points.reduce((s, p) => s + p.x, 0) / n;
-  const meanY = points.reduce((s, p) => s + p.y, 0) / n;
-  let num = 0, den = 0;
-  for (const p of points) {
-    num += (p.x - meanX) * (p.y - meanY);
-    den += (p.x - meanX) ** 2;
+  const count = points.length;
+  if (count === 0) return Array(ahead).fill(0);
+  if (count === 1) return Array(ahead).fill(round2(points[0].y));
+  const meanX = points.reduce((total, point) => total + point.x, 0) / count;
+  const meanY = points.reduce((total, point) => total + point.y, 0) / count;
+  let numerator = 0;
+  let denominator = 0;
+  for (const point of points) {
+    numerator += (point.x - meanX) * (point.y - meanY);
+    denominator += (point.x - meanX) ** 2;
   }
-  const slope = den === 0 ? 0 : num / den;
-  const last = points[n - 1];
-  const out = [];
-  for (let i = 1; i <= ahead; i++) {
-    // trend damped by 0.8 so projections stay grounded
-    out.push(Math.max(0, round2(last.y + slope * i * 0.8)));
-  }
-  return out;
+  const slope = denominator === 0 ? 0 : numerator / denominator;
+  const last = points[count - 1];
+  return Array.from({ length: ahead }, (_, index) => Math.max(0, round2(last.y + slope * (index + 1) * 0.8)));
 }
 
-export function buildForecast(userId, baseCurrency) {
-  const txs = userTransactions(userId);
-  const today = new Date().toISOString().slice(0, 10);
-  const curMonth = today.slice(0, 7);
-
-  // bucket last up to 8 months
+// Forecasts only use wallets in the selected currency. Different currencies
+// remain separate and are never converted or added together.
+export function buildForecast(userId, currency) {
+  const transactions = currencyTransactions(userId, currency);
+  const today = todayStr();
+  const currentMonth = today.slice(0, 7);
   const months = [];
-  const d0 = new Date();
-  d0.setDate(1);
-  for (let i = 7; i >= 0; i--) {
-    const d = new Date(d0);
-    d.setMonth(d.getMonth() - i);
-    months.push(d.toISOString().slice(0, 7));
+  const firstOfMonth = new Date();
+  firstOfMonth.setDate(1);
+  for (let index = 7; index >= 0; index--) {
+    const date = new Date(firstOfMonth);
+    date.setMonth(date.getMonth() - index);
+    months.push(date.toISOString().slice(0, 7));
   }
 
-  const series = months.map((mk) => {
-    const inM = txs.filter((t) => monthKey(t.date) === mk);
-    return {
-      key: mk,
-      label: monthLabel(mk),
-      income: round2(inM.filter((t) => t.type === 'income').reduce((s, t) => s + t.usdAmount, 0)),
-      expense: round2(inM.filter((t) => t.type === 'expense').reduce((s, t) => s + t.usdAmount, 0))
-    };
+  const history = months.map((key) => {
+    const inMonth = transactions.filter((transaction) => monthKey(transaction.date) === key);
+    return { key, label: monthLabel(key), income: amountFor(inMonth, 'income'), expense: amountFor(inMonth, 'expense') };
   });
-
-  const history = series.filter((s) => s.key < curMonth && (s.income > 0 || s.expense > 0));
-  const fInc = linearForecast(history.map((s, i) => ({ x: i, y: s.income })), 3);
-  const fExp = linearForecast(history.map((s, i) => ({ x: i, y: s.expense })), 3);
-
+  const activeHistory = history.filter((item) => item.key < currentMonth && (item.income > 0 || item.expense > 0));
+  const incomeForecast = linearForecast(activeHistory.map((item, index) => ({ x: index, y: item.income })), 3);
+  const expenseForecast = linearForecast(activeHistory.map((item, index) => ({ x: index, y: item.expense })), 3);
   const future = [];
-  for (let i = 1; i <= 3; i++) {
-    const d = new Date(d0);
-    d.setMonth(d.getMonth() + i);
-    const mk = d.toISOString().slice(0, 7);
-    future.push({
-      key: mk,
-      label: monthLabel(mk) + ' (proj.)',
-      income: fInc[i - 1],
-      expense: fExp[i - 1],
-      net: round2(fInc[i - 1] - fExp[i - 1]),
-      projected: true
-    });
+  for (let index = 1; index <= 3; index++) {
+    const date = new Date(firstOfMonth);
+    date.setMonth(date.getMonth() + index);
+    const key = date.toISOString().slice(0, 7);
+    future.push({ key, label: `${monthLabel(key)} (proj.)`, income: incomeForecast[index - 1], expense: expenseForecast[index - 1], net: round2(incomeForecast[index - 1] - expenseForecast[index - 1]), projected: true });
   }
 
-  // next-month category breakdown: average of last 3 active months
-  const lastActive = history.slice(-3);
-  const catMap = {};
-  for (const s of lastActive) {
-    const mk = s.key;
-    for (const t of txs.filter((t) => t.type === 'expense' && monthKey(t.date) === mk)) {
-      catMap[t.category] = (catMap[t.category] || 0) + t.usdAmount;
+  const recentActive = activeHistory.slice(-3);
+  const categories = {};
+  for (const month of recentActive) {
+    for (const transaction of transactions.filter((item) => item.type === 'expense' && monthKey(item.date) === month.key)) {
+      categories[transaction.category] = (categories[transaction.category] || 0) + transaction.amount;
     }
   }
-  const n = Math.max(1, lastActive.length);
-  const nextMonthByCategory = Object.entries(catMap)
-    .map(([category, usd]) => ({ category, usd: round2(usd / n), base: round2(fromUSD(usd / n, baseCurrency)) }))
-    .sort((a, b) => b.usd - a.usd);
-
-  const base = (usd) => round2(fromUSD(usd, baseCurrency));
+  const periods = Math.max(1, recentActive.length);
+  const byCategory = Object.entries(categories)
+    .map(([category, amount]) => ({ category, amount: round2(amount / periods) }))
+    .sort((left, right) => right.amount - left.amount);
 
   return {
-    baseCurrency,
-    history: series.map((s) => ({ ...s, incomeBase: base(s.income), expenseBase: base(s.expense) })),
-    future: future.map((f) => ({ ...f, incomeBase: base(f.income), expenseBase: base(f.expense) })),
-    nextMonth: {
-      income: base(fInc[0] || 0),
-      expense: base(fExp[0] || 0),
-      net: base((fInc[0] || 0) - (fExp[0] || 0)),
-      byCategory: nextMonthByCategory
-    },
-    monthlyAvgExpense: base(history.length ? history.reduce((s, h) => s + h.expense, 0) / history.length : 0)
+    currency,
+    history,
+    future,
+    nextMonth: { income: incomeForecast[0] || 0, expense: expenseForecast[0] || 0, net: round2((incomeForecast[0] || 0) - (expenseForecast[0] || 0)), byCategory },
+    monthlyAvgExpense: round2(activeHistory.length ? activeHistory.reduce((total, item) => total + item.expense, 0) / activeHistory.length : 0)
   };
 }
-
-// ---------- alerts ----------
 
 export function buildAlerts(userId) {
-  const today = new Date().toISOString().slice(0, 10);
-  const soon = new Date();
-  soon.setDate(soon.getDate() + 7);
-  const soonStr = soon.toISOString().slice(0, 10);
-
-  const items = userLiabilities(userId)
-    .filter((l) => l.status === 'unpaid')
-    .map((l) => {
-      let level = null;
-      if (l.dueDate < today) level = 'overdue';
-      else if (l.dueDate <= soonStr) level = 'due-soon';
-      return { ...l, nativeAmount: round2(l.amount), level, daysLeft: Math.round((new Date(l.dueDate) - new Date(today)) / 86400000) };
-    })
-    .filter((l) => l.level);
-
-  items.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const today = todayStr();
+  const all = userLiabilities(userId).filter((liability) => liability.status === 'unpaid').map((liability) => {
+    const daysLeft = Math.round((new Date(liability.dueDate) - new Date(today)) / 86400000);
+    const level = daysLeft < 0 ? 'overdue' : daysLeft <= 7 ? 'due-soon' : null;
+    return { ...liability, nativeAmount: round2(liability.amount), level, daysLeft };
+  }).filter((liability) => liability.level);
   return {
-    overdue: items.filter((i) => i.level === 'overdue'),
-    dueSoon: items.filter((i) => i.level === 'due-soon'),
-    all: items
+    all,
+    overdue: all.filter((liability) => liability.level === 'overdue'),
+    dueSoon: all.filter((liability) => liability.level === 'due-soon')
   };
 }
 
-// ---------- AI assistant ----------
+export function chatReply(userId, message, currency) {
+  const user = getDb().users.find((item) => item.id === userId);
+  const transactions = currencyTransactions(userId, currency);
+  const settled = transactions.filter((transaction) => transaction.date <= todayStr());
+  const thisMonth = todayStr().slice(0, 7);
+  const forecast = buildForecast(userId, currency);
+  const balance = round2(amountFor(settled, 'income') - amountFor(settled, 'expense'));
+  const format = (amount, code = currency) => `${(CURRENCIES[code] || { symbol: `${code} ` }).symbol}${round2(amount).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+  const words = String(message || '').toLowerCase();
+  const has = (...terms) => terms.some((term) => words.includes(term));
 
-export function chatReply(userId, message, baseCurrency) {
-  const msg = message.toLowerCase().trim();
-  const db = getDb();
-  const user = db.users.find((u) => u.id === userId);
-  const cur = CURRENCIES[baseCurrency] || CURRENCIES.USD;
-  const fmt = (usd) => `${cur.symbol}${fromUSD(usd, baseCurrency).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
-  const today = new Date().toISOString().slice(0, 10);
-  const thisMonth = today.slice(0, 7);
+  if (/\b(?:hello|hi|hey)\b/.test(words)) return `Hello ${user?.name?.split(' ')[0] || 'there'}. I track each wallet in its own currency without exchange-rate conversion.`;
 
-  const txs = userTransactions(userId);
-  const settled = txs.filter((t) => t.date <= today);
-  const balance = settled.reduce((s, t) => s + (t.type === 'income' ? t.usdAmount : -t.usdAmount), 0);
-  const alerts = buildAlerts(userId);
-  const forecast = buildForecast(userId, baseCurrency);
-
-  const has = (...words) => words.some((w) => msg.includes(w));
-
-  // greeting
-  if (/^(hi|hello|hey|yo|salam|salaam|sup|hola)\b/.test(msg) || msg === 'hi') {
-    return `heyy ${user.name.split(' ')[0]} 👋 i'm **Zeno**, your money bestie. i can break down your spending, check your balance, remind you about debts, or predict next month. try *"how much did i spend on food this month?"* or *"what do i owe?"*`;
-  }
-
-  // help
-  if (has('help', 'what can you do', 'commands')) {
-    return [
-      "here's what i got for you ✨",
-      '- **balance** — what you can spend right now',
-      '- **spending by category** — *"how much did i spend on food?"*',
-      '- **top / biggest expenses** — where your money ghosted to',
-      '- **income** — what\'s coming in',
-      '- **debts / due** — liabilities & due-date alerts',
-      '- **forecast** — next month prediction',
-      '- **advice** — a quick financial read on you'
-    ].join('\n');
-  }
-
-  // balance
   if (has('balance', 'how much money', 'can i afford', 'how much can i spend', 'net worth')) {
-    const scheduled = txs.filter((t) => t.date > today);
     const accounts = accountBalances(userId);
-    let out = `your total available balance is **${fmt(balance)}** 💰`;
-    if (accounts.length > 1) {
-      out += ', split across your wallets:\n' + accounts.map((a) => `- **${a.name}** (${a.currency}): ${CURRENCIES[a.currency]?.symbol || ''}${a.native.toLocaleString('en-US', { maximumFractionDigits: 2 })}`).join('\n');
-    }
-    if (scheduled.length) {
-      const schedIn = scheduled.filter((t) => t.type === 'income').reduce((s, t) => s + t.usdAmount, 0);
-      const schedOut = scheduled.filter((t) => t.type === 'expense').reduce((s, t) => s + t.usdAmount, 0);
-      out += `\n\nplus older scheduled entries: **${fmt(schedIn)}** in, **${fmt(schedOut)}** out.`;
-    }
-    if (alerts.overdue.length) out += `\n\n⚠️ heads up: ${alerts.overdue.length} liability is **overdue** — tap the Liabilities tab.`;
-    return out;
+    let reply = `Your ${currency} wallet balance is **${format(balance)}**.`;
+    if (accounts.length) reply += '\n\nWallet balances are kept separate:\n' + accounts.map((account) => `- **${account.name}** (${account.currency}): ${format(account.native, account.currency)}`).join('\n');
+    return reply;
   }
 
-  // liabilities / debts
   if (has('owe', 'debt', 'due', 'liabilit', 'loan', 'borrow', 'bill reminder', 'alert')) {
-    const unpaid = userLiabilities(userId).filter((l) => l.status === 'unpaid');
-    if (!unpaid.length) return "you're clean — zero unpaid liabilities 🧼✨";
-    const total = unpaid.reduce((s, l) => s + l.usdAmount, 0);
-    let out = `you owe **${fmt(total)}** across ${unpaid.length} ${unpaid.length > 1 ? 'liabilities' : 'liability'}:`;
-    for (const l of unpaid.sort((a, b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 6)) {
-      const days = Math.round((new Date(l.dueDate) - new Date(today)) / 86400000);
-      const tag = l.dueDate < today ? '🔴 OVERDUE' : days <= 7 ? `🟡 due in ${days}d` : `📅 ${l.dueDate}`;
-      out += `\n- ${l.name} — ${fmt(l.usdAmount)} · ${tag}`;
-    }
-    return out;
+    const unpaid = userLiabilities(userId).filter((liability) => liability.status === 'unpaid');
+    if (!unpaid.length) return 'You have no unpaid liabilities.';
+    return 'Open liabilities (kept in their own currencies):\n' + unpaid.sort((left, right) => left.dueDate.localeCompare(right.dueDate)).slice(0, 6).map((liability) => `- **${liability.name}** - ${format(liability.amount, liability.currency)} - due ${liability.dueDate}`).join('\n');
   }
 
-  // forecast
   if (has('forecast', 'predict', 'next month', 'projection', 'future', 'how much will')) {
-    const nm = forecast.nextMonth;
-    return [
-      `crunching your last months of data 📈 here's the vibe for next month:`,
-      `- expected income: **${fmt(nm.income)}**`,
-      `- expected spending: **${fmt(nm.expense)}**`,
-      `- projected net: **${nm.net >= 0 ? '+' : ''}${fmt(nm.net)}** ${nm.net >= 0 ? '🟢' : '🔴'}`
-    ].join('\n') +
-      (nm.byCategory.length ? `\n\nbiggest expected categories: ` + nm.byCategory.slice(0, 3).map((c) => `${c.category} (~${fmt(c.usd)})`).join(', ') : '');
+    const next = forecast.nextMonth;
+    return `For your ${currency} wallets next month: income **${format(next.income)}**, spending **${format(next.expense)}**, net **${next.net >= 0 ? '+' : ''}${format(next.net)}**.`;
   }
 
-  // income
   if (has('income', 'earn', 'salary', 'make money', 'revenue')) {
-    const inMonth = settled.filter((t) => t.type === 'income' && monthKey(t.date) === thisMonth).reduce((s, t) => s + t.usdAmount, 0);
-    const total = settled.filter((t) => t.type === 'income').reduce((s, t) => s + t.usdAmount, 0);
-    return `this month you brought in **${fmt(inMonth)}** 💸 and **${fmt(total)}** all-time. next month i'm predicting **${fmt(forecast.nextMonth.income)}**.`;
+    const monthIncome = amountFor(settled.filter((transaction) => monthKey(transaction.date) === thisMonth), 'income');
+    return `In ${currency}, you earned **${format(monthIncome)}** this month and **${format(amountFor(settled, 'income'))}** all time.`;
   }
 
-  // biggest expense / top categories
+  const expenses = settled.filter((transaction) => transaction.type === 'expense');
   if (has('biggest', 'top', 'most expensive', 'where did my money', 'spending breakdown', 'breakdown')) {
-    const exp = settled.filter((t) => t.type === 'expense');
-    if (!exp.length) return "no expenses logged yet — living that free-cost life? 😅";
-    const byCat = {};
-    for (const t of exp) byCat[t.category] = (byCat[t.category] || 0) + t.usdAmount;
-    const top = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 5);
-    const total = exp.reduce((s, t) => s + t.usdAmount, 0);
-    let out = 'your money went like this:\n';
-    for (const [cat, usd] of top) {
-      const pct = Math.round((usd / total) * 100);
-      out += `\n- **${cat}** — ${fmt(usd)} (${pct}%)`;
-    }
-    return out;
+    if (!expenses.length) return `No ${currency} expenses have been logged yet.`;
+    const categories = {};
+    for (const expense of expenses) categories[expense.category] = (categories[expense.category] || 0) + expense.amount;
+    const total = amountFor(expenses);
+    return 'Your spending by category:\n' + Object.entries(categories).sort((left, right) => right[1] - left[1]).slice(0, 5).map(([category, amount]) => `- **${category}** - ${format(amount)} (${Math.round((amount / total) * 100)}%)`).join('\n');
   }
 
-  // spending on a category
-  const spendMatch = msg.match(/(?:spend|spent|expense|paid|pay|cost|bought)/);
-  if (spendMatch) {
-    const exp = settled.filter((t) => t.type === 'expense');
-    // find a category mentioned
-    const cats = ['food', 'rent', 'transport', 'shopping', 'entertainment', 'health', 'education', 'bills', 'subscriptions', 'travel', 'other'];
-    const cat = cats.find((c) => msg.includes(c));
-    const isMonth = has('this month', 'monthly');
-    const pool = isMonth ? exp.filter((t) => monthKey(t.date) === thisMonth) : exp;
-    if (cat) {
-      const cname = cat === 'other' ? 'Other' : cat[0].toUpperCase() + cat.slice(1);
-      const matched = pool.filter((t) => t.category.toLowerCase() === cname.toLowerCase());
-      const sum = matched.reduce((s, t) => s + t.usdAmount, 0);
-      const scope = isMonth ? 'this month' : 'all time';
-      if (!matched.length) return `zero spent on **${cname}** ${scope} 🙌`;
-      return `you've spent **${fmt(sum)}** on ${cname} ${scope} across ${matched.length} transaction${matched.length > 1 ? 's' : ''}. ${sum > balance * 0.3 ? "that's a chunk of your balance 👀" : 'pretty chill ngl ✨'}`;
+  if (has('spend', 'spent', 'expense', 'paid', 'pay', 'cost', 'bought')) {
+    const category = ['food', 'rent', 'transport', 'shopping', 'entertainment', 'health', 'education', 'bills', 'subscriptions', 'travel', 'other'].find((item) => words.includes(item));
+    const monthly = has('this month', 'monthly');
+    const pool = monthly ? expenses.filter((transaction) => monthKey(transaction.date) === thisMonth) : expenses;
+    if (category) {
+      const name = category === 'other' ? 'Other' : category[0].toUpperCase() + category.slice(1);
+      const matching = pool.filter((transaction) => transaction.category.toLowerCase() === name.toLowerCase());
+      return matching.length ? `You spent **${format(amountFor(matching))}** on ${name} ${monthly ? 'this month' : 'all time'}.` : `No ${name} spending was found ${monthly ? 'this month' : 'yet'}.`;
     }
-    const sum = pool.reduce((s, t) => s + t.usdAmount, 0);
-    return `total spending ${isMonth ? 'this month' : 'all time'} is **${fmt(sum)}**. ask me about a specific category like *"food"* or *"transport"* for the breakdown 🔍`;
+    return `Total ${currency} spending ${monthly ? 'this month' : 'all time'} is **${format(amountFor(pool))}**.`;
   }
 
-  // advice
   if (has('advice', 'tip', 'should i', 'save', 'saving', 'budget')) {
-    const exp = settled.filter((t) => t.type === 'expense' && monthKey(t.date) === thisMonth).reduce((s, t) => s + t.usdAmount, 0);
-    const inc = settled.filter((t) => t.type === 'income' && monthKey(t.date) === thisMonth).reduce((s, t) => s + t.usdAmount, 0);
-    const rate = inc > 0 ? Math.round(((inc - exp) / inc) * 100) : 0;
-    let out = inc === 0
-      ? "log some income first and i'll cook up real advice 👨‍🍳"
-      : `your savings rate this month is **${rate}%** ${rate >= 20 ? '— lowkey impressive 🏆' : rate >= 0 ? '— solid, but there\'s room 👀' : '— bestie you\'re spending more than you make 😭'}`;
-    if (alerts.overdue.length) out += `\n- 🚨 clear that **overdue liability** first, late fees are not the vibe.`;
-    else if (alerts.dueSoon.length) out += `\n- 🟡 a payment is due within 7 days — keep cash ready.`;
-    if (forecast.nextMonth.byCategory[0]) out += `\n- your biggest leak is **${forecast.nextMonth.byCategory[0].category}** (~${fmt(forecast.nextMonth.byCategory[0].usd)}/mo). trimming it 15% saves you ~${fmt(forecast.nextMonth.byCategory[0].usd * 0.15)}.`;
-    out += `\n- aim for a 20% savings rate — future you says thanks 🫡`;
-    return out;
+    const monthlyIncome = amountFor(settled.filter((transaction) => monthKey(transaction.date) === thisMonth), 'income');
+    const monthlyExpense = amountFor(settled.filter((transaction) => monthKey(transaction.date) === thisMonth), 'expense');
+    if (!monthlyIncome) return `Add ${currency} income first and I can calculate a useful savings rate.`;
+    return `Your ${currency} savings rate this month is **${Math.round(((monthlyIncome - monthlyExpense) / monthlyIncome) * 100)}%**. Keep each currency wallet budgeted separately.`;
   }
 
-  // thanks / bye
-  if (has('thank', 'thanks', 'bye', 'love you')) {
-    return "anytime bestie 💜 keep that balance glowing ✨";
-  }
-
-  // fallback
-  return `hmm i didn't fully catch that 🤔 i'm great at: **balance**, **spending on a category**, **debts & due dates**, **forecast for next month**, and **advice**. try one of those!`;
+  return `I can help with balances, spending, liabilities, forecasts, and advice. Figures stay in each wallet's original currency without conversion.`;
 }
