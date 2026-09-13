@@ -71,7 +71,7 @@ function linearForecast(points, ahead) {
 // Forecasts only use wallets in the selected currency. Different currencies
 // remain separate and are never converted or added together.
 export function buildForecast(userId, currency) {
-  const transactions = currencyTransactions(userId, currency);
+  const transactions = currencyTransactions(userId, currency).filter((transaction) => !transaction.ledgerKind);
   const today = todayStr();
   const currentMonth = today.slice(0, 7);
   const months = [];
@@ -119,12 +119,19 @@ export function buildForecast(userId, currency) {
   };
 }
 
-export function buildAlerts(userId) {
-  const today = todayStr();
+export function buildAlerts(userId, referenceDate = todayStr()) {
+  const today = referenceDate;
   const all = userLiabilities(userId).filter((liability) => liability.status === 'unpaid').map((liability) => {
     const daysLeft = Math.round((new Date(liability.dueDate) - new Date(today)) / 86400000);
     const level = daysLeft < 0 ? 'overdue' : daysLeft <= 7 ? 'due-soon' : null;
-    return { ...liability, nativeAmount: round2(liability.amount), level, daysLeft };
+    const paidAmount = round2((liability.payments || []).reduce((sum, payment) => sum + payment.amount, 0));
+    return {
+      ...liability,
+      nativeAmount: round2(Math.max(0, liability.amount - paidAmount)),
+      paidAmount,
+      level,
+      daysLeft
+    };
   }).filter((liability) => liability.level);
   return {
     all,
@@ -134,17 +141,55 @@ export function buildAlerts(userId) {
 }
 
 export function chatReply(userId, message, currency) {
-  const user = getDb().users.find((item) => item.id === userId);
+  const db = getDb();
+  const user = db.users.find((item) => item.id === userId);
   const transactions = currencyTransactions(userId, currency);
   const settled = transactions.filter((transaction) => transaction.date <= todayStr());
+  const activity = settled.filter((transaction) => !transaction.ledgerKind);
   const thisMonth = todayStr().slice(0, 7);
   const forecast = buildForecast(userId, currency);
   const balance = round2(amountFor(settled, 'income') - amountFor(settled, 'expense'));
   const format = (amount, code = currency) => `${(CURRENCIES[code] || { symbol: `${code} ` }).symbol}${round2(amount).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
   const words = String(message || '').toLowerCase();
   const has = (...terms) => terms.some((term) => words.includes(term));
+  const receivables = db.receivables.filter((item) => item.userId === userId);
+  const openReceivables = receivables.filter((item) => item.status === 'outstanding');
+  const liabilities = userLiabilities(userId);
+  const openLiabilities = liabilities.filter((item) => item.status === 'unpaid');
+  const paidFor = (item) => round2((item.payments || []).reduce((sum, payment) => sum + payment.amount, 0));
+  const remainingFor = (item) => round2(Math.max(0, item.amount - paidFor(item)));
+  const groupedRemaining = (items) => Object.values(items.reduce((groups, item) => {
+    const group = groups[item.currency] ||= { currency: item.currency, amount: 0 };
+    group.amount += remainingFor(item);
+    return groups;
+  }, {})).map((group) => format(round2(group.amount), group.currency)).join(' · ');
 
   if (/\b(?:hello|hi|hey)\b/.test(words)) return `Hello ${user?.name?.split(' ')[0] || 'there'}. I track each wallet in its own currency without exchange-rate conversion.`;
+
+  if (has('overview', 'summary', 'financial position', 'show me everything')) {
+    const monthIncome = amountFor(activity.filter((transaction) => monthKey(transaction.date) === thisMonth), 'income');
+    const monthExpense = amountFor(activity.filter((transaction) => monthKey(transaction.date) === thisMonth), 'expense');
+    const accounts = accountBalances(userId);
+    return `Here is your financial overview:\n- Wallets: ${accounts.map((account) => `**${account.name}** ${format(account.native, account.currency)}`).join(' · ') || 'none'}\n- ${currency} income this month: **${format(monthIncome)}**\n- ${currency} spending this month: **${format(monthExpense)}**\n- Owed to you: **${openReceivables.length ? groupedRemaining(openReceivables) : 'nothing'}** (${openReceivables.length} open)\n- You owe: **${openLiabilities.length ? groupedRemaining(openLiabilities) : 'nothing'}** (${openLiabilities.length} open)\n\nMoney lent, repayments, and debt payments affect wallet balances but stay separate from income and spending.`;
+  }
+
+  if (has('who owes me', 'owed to me', 'owe me', 'others owe', 'people owe', 'owed by', 'money with others', 'lent money', 'loaned money', 'paid me back', 'paid back to me', 'receivable')) {
+    if (!openReceivables.length) return 'Nobody currently owes you money. Fully returned records remain available on the Money with others page.';
+    return 'Money still owed to you:\n' + openReceivables
+      .sort((left, right) => left.date.localeCompare(right.date))
+      .slice(0, 8)
+      .map((item) => `- **${item.person}** - ${format(remainingFor(item), item.currency)} remaining for ${item.reason} (${format(paidFor(item), item.currency)} paid back)`)
+      .join('\n') + `\n\nTotal by currency: **${groupedRemaining(openReceivables)}**. This is not income until earned; repayments only restore money previously given out.`;
+  }
+
+  if (has('i owe', 'what do i owe', 'owe', 'debt', 'liabilit', 'loan', 'borrow', 'payment due', 'due date', 'bill reminder', 'creditor', 'alert')) {
+    if (!openLiabilities.length) return 'You have no unpaid liabilities.';
+    return 'Open liabilities:\n' + openLiabilities
+      .sort((left, right) => left.dueDate.localeCompare(right.dueDate))
+      .slice(0, 8)
+      .map((item) => `- **${item.creditor || 'Unspecified creditor'}** - ${format(remainingFor(item), item.currency)} remaining for ${item.name}; due ${item.dueDate} (${format(paidFor(item), item.currency)} paid)`)
+      .join('\n') + `\n\nTotal by currency: **${groupedRemaining(openLiabilities)}**. Liability payments reduce wallet balance but are tracked separately from everyday spending.`;
+  }
 
   if (has('balance', 'how much money', 'can i afford', 'how much can i spend', 'net worth')) {
     const accounts = accountBalances(userId);
@@ -153,23 +198,17 @@ export function chatReply(userId, message, currency) {
     return reply;
   }
 
-  if (has('owe', 'debt', 'due', 'liabilit', 'loan', 'borrow', 'bill reminder', 'alert')) {
-    const unpaid = userLiabilities(userId).filter((liability) => liability.status === 'unpaid');
-    if (!unpaid.length) return 'You have no unpaid liabilities.';
-    return 'Open liabilities (kept in their own currencies):\n' + unpaid.sort((left, right) => left.dueDate.localeCompare(right.dueDate)).slice(0, 6).map((liability) => `- **${liability.name}** - ${format(liability.amount, liability.currency)} - due ${liability.dueDate}`).join('\n');
-  }
-
   if (has('forecast', 'predict', 'next month', 'projection', 'future', 'how much will')) {
     const next = forecast.nextMonth;
     return `For your ${currency} wallets next month: income **${format(next.income)}**, spending **${format(next.expense)}**, net **${next.net >= 0 ? '+' : ''}${format(next.net)}**.`;
   }
 
   if (has('income', 'earn', 'salary', 'make money', 'revenue')) {
-    const monthIncome = amountFor(settled.filter((transaction) => monthKey(transaction.date) === thisMonth), 'income');
-    return `In ${currency}, you earned **${format(monthIncome)}** this month and **${format(amountFor(settled, 'income'))}** all time.`;
+    const monthIncome = amountFor(activity.filter((transaction) => monthKey(transaction.date) === thisMonth), 'income');
+    return `In ${currency}, you earned **${format(monthIncome)}** this month and **${format(amountFor(activity, 'income'))}** all time.`;
   }
 
-  const expenses = settled.filter((transaction) => transaction.type === 'expense');
+  const expenses = activity.filter((transaction) => transaction.type === 'expense');
   if (has('biggest', 'top', 'most expensive', 'where did my money', 'spending breakdown', 'breakdown')) {
     if (!expenses.length) return `No ${currency} expenses have been logged yet.`;
     const categories = {};
@@ -191,11 +230,16 @@ export function chatReply(userId, message, currency) {
   }
 
   if (has('advice', 'tip', 'should i', 'save', 'saving', 'budget')) {
-    const monthlyIncome = amountFor(settled.filter((transaction) => monthKey(transaction.date) === thisMonth), 'income');
-    const monthlyExpense = amountFor(settled.filter((transaction) => monthKey(transaction.date) === thisMonth), 'expense');
+    const monthlyIncome = amountFor(activity.filter((transaction) => monthKey(transaction.date) === thisMonth), 'income');
+    const monthlyExpense = amountFor(activity.filter((transaction) => monthKey(transaction.date) === thisMonth), 'expense');
     if (!monthlyIncome) return `Add ${currency} income first and I can calculate a useful savings rate.`;
-    return `Your ${currency} savings rate this month is **${Math.round(((monthlyIncome - monthlyExpense) / monthlyIncome) * 100)}%**. Keep each currency wallet budgeted separately.`;
+    let context = '';
+    const sameCurrencyOwed = openReceivables.filter((item) => item.currency === currency).reduce((sum, item) => sum + remainingFor(item), 0);
+    const sameCurrencyDebt = openLiabilities.filter((item) => item.currency === currency).reduce((sum, item) => sum + remainingFor(item), 0);
+    if (sameCurrencyOwed) context += ` You have **${format(sameCurrencyOwed)}** still with other people, so do not budget it as available cash until repaid.`;
+    if (sameCurrencyDebt) context += ` You also have **${format(sameCurrencyDebt)}** in open liabilities to plan for.`;
+    return `Your ${currency} savings rate this month is **${Math.round(((monthlyIncome - monthlyExpense) / monthlyIncome) * 100)}%**. Keep each currency wallet budgeted separately.${context}`;
   }
 
-  return `I can help with balances, spending, liabilities, forecasts, and advice. Figures stay in each wallet's original currency without conversion.`;
+  return `I can help with wallet balances, income, spending, who owes you, partial repayments, liabilities, debt payments, due dates, forecasts, and advice. Owed and debt movements stay separate from income and expenses, and currencies are never converted.`;
 }

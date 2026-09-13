@@ -44,7 +44,9 @@ const DB_KEY = 'expenzo:db';
 let pendingWrite = Promise.resolve();
 let lastError = null;
 
-const emptyDb = () => ({ users: [], sessions: {}, accounts: [], transactions: [], liabilities: [], counters: {} });
+const emptyDb = () => ({
+  users: [], sessions: {}, accounts: [], transactions: [], liabilities: [], receivables: [], counters: {}
+});
 
 // single command → POST to the root endpoint; SET (pipeline) → /pipeline endpoint.
 // the formats differ on Upstash: root takes ["GET","key"], /pipeline takes [["SET",...]]
@@ -139,6 +141,10 @@ export function pendingWrites() {
 function migrate() {
   let touched = false;
   db.accounts ||= [];
+  if (!Array.isArray(db.receivables)) {
+    db.receivables = [];
+    touched = true;
+  }
   for (const user of db.users) {
     let accounts = db.accounts.filter((a) => a.userId === user.id);
     if (!accounts.length) {
@@ -176,6 +182,53 @@ function migrate() {
     if ('usdAmount' in liability) {
       delete liability.usdAmount;
       touched = true;
+    }
+    if (!Array.isArray(liability.payments)) {
+      liability.payments = [];
+      const linked = db.transactions.find((t) => t.id === liability.linkedTransactionId);
+      if (linked) {
+        liability.payments.push({
+          transactionId: linked.id,
+          amount: linked.amount,
+          date: linked.date,
+          accountId: linked.accountId
+        });
+      }
+      touched = true;
+    }
+    for (const payment of liability.payments) {
+      const transaction = db.transactions.find((t) => t.id === payment.transactionId);
+      if (transaction && transaction.ledgerKind !== 'liability_payment') {
+        transaction.ledgerKind = 'liability_payment';
+        touched = true;
+      }
+    }
+  }
+  for (const receivable of db.receivables) {
+    if (!Array.isArray(receivable.payments)) {
+      receivable.payments = [];
+      const linked = db.transactions.find((t) => t.id === receivable.linkedTransactionId);
+      if (linked) {
+        receivable.payments.push({
+          transactionId: linked.id,
+          amount: linked.amount,
+          date: linked.date,
+          accountId: linked.accountId
+        });
+      }
+      touched = true;
+    }
+    const outgoing = db.transactions.find((t) => t.id === receivable.outgoingTransactionId);
+    if (outgoing && outgoing.ledgerKind !== 'money_owed_to_user') {
+      outgoing.ledgerKind = 'money_owed_to_user';
+      touched = true;
+    }
+    for (const payment of receivable.payments) {
+      const transaction = db.transactions.find((t) => t.id === payment.transactionId);
+      if (transaction && transaction.ledgerKind !== 'money_returned') {
+        transaction.ledgerKind = 'money_returned';
+        touched = true;
+      }
     }
   }
   if (touched) save();

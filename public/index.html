@@ -66,6 +66,7 @@
       <div class="logo"><span class="x">Expenzo</span></div>
       <a class="nav-item" data-nav="dashboard" href="#/dashboard"><span class="ico">🏠</span>Dashboard</a>
       <a class="nav-item" data-nav="transactions" href="#/transactions"><span class="ico">💳</span>Transactions</a>
+      <a class="nav-item" data-nav="receivables" href="#/receivables"><span class="ico">👥</span>Money with others</a>
       <a class="nav-item" data-nav="liabilities" href="#/liabilities"><span class="ico">🧾</span>Liabilities<span class="dot" id="navLiabDot" style="display:none">0</span></a>
       <a class="nav-item" data-nav="forecast" href="#/forecast"><span class="ico">📈</span>Forecast</a>
       <a class="nav-item" data-nav="assistant" href="#/assistant"><span class="ico">🤖</span>Zeno AI</a>
@@ -112,6 +113,7 @@
 
       <section id="view-dashboard" class="view"></section>
       <section id="view-transactions" class="view" style="display:none"></section>
+      <section id="view-receivables" class="view" style="display:none"></section>
       <section id="view-liabilities" class="view" style="display:none"></section>
       <section id="view-forecast" class="view" style="display:none"></section>
       <section id="view-assistant" class="view" style="display:none"></section>
@@ -124,6 +126,7 @@
   <nav class="bottom-nav" id="bottomNav">
     <a data-nav="dashboard" href="#/dashboard"><span>🏠</span>Home</a>
     <a data-nav="transactions" href="#/transactions"><span>💳</span>Txs</a>
+    <a data-nav="receivables" href="#/receivables"><span>👥</span>Owed</a>
     <a data-nav="liabilities" href="#/liabilities"><span>🧾</span>Debts</a>
     <a data-nav="forecast" href="#/forecast"><span>📈</span>Stats</a>
     <a data-nav="assistant" href="#/assistant"><span>🤖</span>Zeno</a>
@@ -196,13 +199,61 @@
   <div class="modal">
     <button class="modal-x" onclick="closeModal('liabModal')">✕</button>
     <h3>New liability</h3>
-    <div class="field"><label class="fld">What do you owe?</label><input id="lb_name" placeholder="e.g. Laptop installment, loan from Karim…" maxlength="80"/></div>
+    <div class="field"><label class="fld">Who do you owe?</label><input id="lb_creditor" placeholder="e.g. Karim, bank, landlord…" maxlength="80"/></div>
+    <div class="field"><label class="fld">Reason</label><input id="lb_name" placeholder="e.g. Laptop installment or personal loan" maxlength="80"/></div>
     <div class="grid cols-2" style="gap:14px">
       <div class="field"><label class="fld">Amount</label><input id="lb_amount" type="number" min="0" step="any" placeholder="0.00"/></div>
       <div class="field"><label class="fld">Due date</label><input id="lb_due" type="date"/></div>
     </div>
     <div class="field"><label class="fld">Pay from wallet</label><div id="lb_account"></div></div>
     <button class="btn wfull" onclick="saveLiab()">Add liability 🧾</button>
+  </div>
+</div>
+
+<div class="modal-bg" id="liabPayModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('liabPayModal')">✕</button>
+    <h3>Add liability payment</h3>
+    <p class="muted" id="liabPayText" style="margin-bottom:16px"></p>
+    <div class="field"><label class="fld">Amount paid</label><input id="lb_pay_amount" type="number" min="0.01" step="any" placeholder="0.00"/></div>
+    <div class="field"><label class="fld">Pay from wallet</label><div id="lb_pay_wallet"></div></div>
+    <button class="btn wfull" id="saveLiabPaymentBtn" onclick="saveLiabPayment()">Record payment ✓</button>
+  </div>
+</div>
+
+<div class="modal-bg" id="liabDueModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('liabDueModal')">✕</button>
+    <h3>Adjust due date</h3>
+    <div class="field"><label class="fld">New due date</label><input id="lb_new_due" type="date"/></div>
+    <button class="btn wfull" onclick="saveLiabDueDate()">Update due date 📅</button>
+  </div>
+</div>
+
+<div class="modal-bg" id="receivableModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('receivableModal')">✕</button>
+    <h3>Money with another person</h3>
+    <div class="field"><label class="fld">Person name</label><input id="rc_person" placeholder="e.g. Ahmad" maxlength="80"/></div>
+    <div class="field"><label class="fld">Reason</label><input id="rc_reason" placeholder="e.g. Borrowed for groceries" maxlength="160"/></div>
+    <div class="grid cols-2" style="gap:14px">
+      <div class="field"><label class="fld">Amount</label><input id="rc_amount" type="number" min="0.01" step="any" placeholder="0.00"/></div>
+      <div class="field"><label class="fld">Date <span style="text-transform:none;letter-spacing:0">(today or earlier)</span></label><input id="rc_date" type="date"/></div>
+    </div>
+    <div class="field"><label class="fld">Give from wallet</label><div id="rc_account"></div></div>
+    <div class="demo-hint">Saving subtracts this amount from the selected wallet. When paid back, it is added as income.</div>
+    <button class="btn wfull" id="saveReceivableBtn" onclick="saveReceivable()">Save record 👥</button>
+  </div>
+</div>
+
+<div class="modal-bg" id="receiveMoneyModal">
+  <div class="modal">
+    <button class="modal-x" onclick="closeModal('receiveMoneyModal')">✕</button>
+    <h3>Money paid back</h3>
+    <p class="muted" id="receiveMoneyText" style="margin-bottom:16px"></p>
+    <div class="field"><label class="fld">Amount received</label><input id="rc_receive_amount" type="number" min="0.01" step="any" placeholder="0.00"/></div>
+    <div class="field"><label class="fld">Add income to wallet</label><div id="rc_receive_account"></div></div>
+    <button class="btn wfull" id="confirmReceivablePaidBtn" onclick="confirmReceivablePaid()">Add to balance ✓</button>
   </div>
 </div>
 

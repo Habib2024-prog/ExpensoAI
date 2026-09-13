@@ -9,6 +9,7 @@ const state = {
   txAccount: null,
   txCategory: null,
   liabAccount: null,
+  receivableAccount: null,
   regCurrency: 'AFN',
   chat: []
 };
@@ -17,7 +18,10 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 async function api(path, opts = {}) {
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Timezone-Offset': String(new Date().getTimezoneOffset())
+  };
   if (state.token) headers.Authorization = 'Bearer ' + state.token;
   const res = await fetch('/api' + path, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
   const data = await res.json().catch(() => ({}));
@@ -46,8 +50,21 @@ function fmtBase(usd) {
 function fmtNative(amount, code) {
   return curOf(code).symbol + amount.toLocaleString('en-US', { maximumFractionDigits: 2 });
 }
+function transactionMeta(transaction) {
+  const special = {
+    money_owed_to_user: { label: 'owed to you', icon: '🤝', tone: 'amber', rowClass: 'owed' },
+    money_returned: { label: 'paid back', icon: '↩️', tone: 'cyan', rowClass: 'paid-back' },
+    liability_payment: { label: 'debt payment', icon: '🧾', tone: 'violet', rowClass: 'debt-payment' }
+  }[transaction.ledgerKind];
+  return special || (transaction.type === 'income'
+    ? { label: 'income', icon: '💰', tone: 'green', rowClass: 'income' }
+    : { label: 'expense', icon: '💸', tone: 'red', rowClass: 'expense' });
+}
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
-const todayStr = () => new Date().toISOString().slice(0, 10);
+const todayStr = () => {
+  const now = new Date();
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+};
 function prettyDate(d) {
   return new Date(d + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
@@ -158,9 +175,14 @@ function doLogout() {
   state.txAccount = null;
   state.txCategory = null;
   state.liabAccount = null;
+  state.receivableAccount = null;
   txAccountSel = null;
   txCategorySel = null;
   liabAccountSel = null;
+  receivableAccountSel = null;
+  receiveAccountSel = null;
+  receivablesCache = [];
+  liabilitiesCache = [];
   acCurrencySel = null;
   window.__alerts = null;
   window.__summary = null;
@@ -226,6 +248,7 @@ async function refreshAccounts() {
 const routes = {
   dashboard:   { title: 'Dashboard',   sub: 'your money at a glance ✨',    render: renderDashboard },
   transactions:{ title: 'Transactions', sub: 'every buck, tracked 💳',      render: renderTransactions },
+  receivables: { title: 'Money with others', sub: 'track what people owe you 👥', render: renderReceivables },
   liabilities: { title: 'Liabilities',  sub: 'debts & due dates 🧾',         render: renderLiabilities },
   forecast:    { title: 'Forecast',     sub: 'the future, predicted 📈',     render: renderForecast },
   assistant:   { title: 'Zeno AI',      sub: 'your financial bestie 🤖',     render: renderAssistant },
@@ -308,67 +331,88 @@ async function renderDashboard() {
 
   const txRow = (t) => {
     const acc = state.accounts.find((a) => a.id === t.accountId);
+    const meta = transactionMeta(t);
     return `
     <div class="tx-row">
-      <div class="tx-ico ${t.type}">${t.type === 'income' ? '💰' : '💸'}</div>
+      <div class="tx-ico ${meta.rowClass}">${meta.icon}</div>
       <div class="tx-mid"><div class="t">${esc(t.note || t.category)}</div>
-      <div class="s">${esc(acc?.name || 'wallet')} · ${esc(t.category)} · ${prettyDate(t.date)}${t.isFuture ? ' · <span style="color:var(--cyan)">scheduled</span>' : ''}</div></div>
-      <div class="tx-amt ${t.type}">${t.type === 'income' ? '+' : '−'}${fmtNative(t.amount, t.currency)}</div>
+      <div class="s">${esc(acc?.name || 'wallet')} · ${meta.label} · ${prettyDate(t.date)}${t.isFuture ? ' · <span style="color:var(--cyan)">scheduled</span>' : ''}</div></div>
+      <div class="tx-amt ${meta.rowClass}">${t.type === 'income' ? '+' : '−'}${fmtNative(t.amount, t.currency)}</div>
     </div>`;
   };
 
   const liabilitySummary = s.liabilityTotals.length
     ? s.liabilityTotals.map((group) => fmtNative(group.amount, group.currency)).join(' · ')
     : fmtNative(0, state.user.currency);
+  const receivableSummary = s.receivableTotals.length
+    ? s.receivableTotals.map((group) => fmtNative(group.amount, group.currency)).join(' · ')
+    : fmtNative(0, state.user.currency);
 
   $('#view-dashboard').innerHTML = `
-    <div class="grid cols-4 fade-in">
-      <div class="card glow hero-bal">
-        <div class="lbl">${state.user.currency} balance · ${s.accounts.filter((a) => a.currency === state.user.currency).length} wallet${s.accounts.filter((a) => a.currency === state.user.currency).length !== 1 ? 's' : ''}</div>
-        <div class="amount grad-text">${fmtBase(s.balance)}</div>
-        <div class="proj">Other currency wallets stay separate${s.scheduledIn || s.scheduledOut ? ` · scheduled: ${fmtBase(s.scheduledIn)} in / ${fmtBase(s.scheduledOut)} out` : ''}</div>
-        <div class="spark">${months.map((m) => `
+    <div class="dash-actions fade-in">
+      <button class="btn sm" onclick="openTxModalFor('expense')">＋ Expense</button>
+      <button class="btn sm ghost" onclick="openTxModalFor('income')">＋ Income</button>
+      <a class="btn sm ghost" href="#/receivables">👥 Track owed</a>
+      <a class="btn sm ghost" href="#/liabilities">🧾 Add liability</a>
+    </div>
+
+    <div class="dash-overview fade-in">
+      <div class="card glow dash-balance">
+        <div class="dash-balance-top">
+          <div>
+            <div class="eyebrow">Available balance</div>
+            <div class="amount grad-text">${fmtBase(s.balance)}</div>
+          </div>
+          <span class="pill violet">${state.user.currency}</span>
+        </div>
+        <div class="balance-note">Across ${s.accounts.filter((a) => a.currency === state.user.currency).length} ${state.user.currency} wallet${s.accounts.filter((a) => a.currency === state.user.currency).length !== 1 ? 's' : ''}. Other currencies stay separate.</div>
+        <div class="spark compact">${months.map((m) => `
           <div class="bar-w"><div class="bar" style="height:${Math.max(6, (m.expense / maxBar) * 100)}%" title="${m.label}: ${fmtBase(m.expense)} spent"></div><div class="bl">${m.label.split(' ')[0]}</div></div>`).join('')}
         </div>
       </div>
-      <div class="card stat"><div class="top"><span class="k">Income · this month</span><span class="ico">💰</span></div>
-        <div class="v" style="color:var(--green)">+${fmtBase(s.incomeThisMonth)}</div><div class="d">all-time ${fmtBase(s.incomeAll)}</div></div>
-      <div class="card stat"><div class="top"><span class="k">Spent · this month</span><span class="ico">💸</span></div>
-        <div class="v" style="color:var(--red)">−${fmtBase(s.expenseThisMonth)}</div><div class="d">all-time ${fmtBase(s.expenseAll)}</div></div>
-    </div>
 
-    <div class="sec-head">
-      <h3>My wallets <span class="pill gray" style="margin-left:6px">${state.user.currency} locked at signup</span></h3>
-      <span class="lnk" onclick="openAccountModal()">＋ new wallet →</span>
-    </div>
-    <div class="liab-grid fade-in">${s.accounts.map(accCard).join('')}</div>
-
-    <div class="grid cols-2" style="margin-top:6px">
-      <div>
-        <div class="sec-head" style="margin-top:0"><h3>Due-date alerts</h3><a href="#/liabilities">all liabilities →</a></div>
-        <div class="alert-band fade-in">${alertsHtml}</div>
-      </div>
-      <div>
-        <div class="sec-head" style="margin-top:0"><h3>Money you owe</h3></div>
-        <div class="card stat fade-in" style="gap:10px">
-          <div class="top"><span class="k">Unpaid liabilities</span><span class="ico">🧾</span></div>
-          <div class="v" style="color:var(--amber)">${liabilitySummary}</div>
-          <div class="d">${s.liabilitiesCount} open · <a class="lnk" href="#/liabilities" style="color:#c4b5fd">manage →</a></div>
-          <div class="d">${state.user.currency} wallets: avg monthly spending ${fmtBase(f.monthlyAvgExpense)} · projected next month ${fmtBase(f.nextMonth.expense)}</div>
+      <div class="dash-metrics">
+        <div class="card dash-metric income-metric">
+          <div class="metric-icon">↗</div><div><div class="k">Income this month</div><div class="v">${fmtBase(s.incomeThisMonth)}</div><div class="d">${fmtBase(s.incomeAll)} all-time</div></div>
         </div>
+        <div class="card dash-metric expense-metric">
+          <div class="metric-icon">↘</div><div><div class="k">Spent this month</div><div class="v">${fmtBase(s.expenseThisMonth)}</div><div class="d">${fmtBase(s.expenseAll)} all-time</div></div>
+        </div>
+        <a class="card dash-metric owed-metric" href="#/receivables">
+          <div class="metric-icon">🤝</div><div><div class="k">Owed to you</div><div class="v">${receivableSummary}</div><div class="d">${s.receivablesCount} open record${s.receivablesCount === 1 ? '' : 's'}</div></div>
+        </a>
+        <a class="card dash-metric liability-metric" href="#/liabilities">
+          <div class="metric-icon">🧾</div><div><div class="k">You owe</div><div class="v">${liabilitySummary}</div><div class="d">${s.liabilitiesCount} open liabilit${s.liabilitiesCount === 1 ? 'y' : 'ies'}</div></div>
+        </a>
       </div>
     </div>
 
-    <div class="grid cols-2" style="margin-top:6px">
-      <div>
-        <div class="sec-head" style="margin-top:0"><h3>Recent activity</h3><a href="#/transactions">see all →</a></div>
-        <div class="card">${s.recent.length ? s.recent.map(txRow).join('') : '<div class="empty"><div class="big">🪙</div>nothing yet — add your first transaction!</div>'}</div>
-      </div>
-      <div>
-        <div class="sec-head" style="margin-top:0"><h3>Scheduled (older future-dated)</h3></div>
-        <div class="card">${s.scheduledTx.length ? s.scheduledTx.map(txRow).join('') : '<div class="empty"><div class="big">⏳</div>no scheduled entries — new ones can\'t be future-dated anymore.</div>'}</div>
-      </div>
-    </div>`;
+    <div class="sec-head dash-section-head">
+      <div><h3>Wallets</h3><p>Each currency keeps its own balance</p></div>
+      <span class="lnk" onclick="openAccountModal()">＋ New wallet</span>
+    </div>
+    <div class="liab-grid dash-wallets fade-in">${s.accounts.map(accCard).join('')}</div>
+
+    <div class="dash-content fade-in">
+      <section>
+        <div class="sec-head dash-section-head"><div><h3>Recent activity</h3><p>Your latest wallet movements</p></div><a href="#/transactions">View all →</a></div>
+        <div class="card activity-card">${s.recent.length ? s.recent.map(txRow).join('') : '<div class="empty"><div class="big">🪙</div>Nothing yet — add your first transaction.</div>'}</div>
+      </section>
+      <aside>
+        <div class="sec-head dash-section-head"><div><h3>Due soon</h3><p>Liability reminders</p></div><a href="#/liabilities">View all →</a></div>
+        <div class="alert-band">${alertsHtml}</div>
+      </aside>
+    </div>
+
+    ${s.scheduledTx.length ? `<div class="dash-scheduled fade-in">
+      <div class="sec-head dash-section-head"><div><h3>Older scheduled entries</h3><p>Future-dated records from an earlier version</p></div></div>
+      <div class="card">${s.scheduledTx.map(txRow).join('')}</div>
+    </div>` : ''}`;
+}
+
+function openTxModalFor(type) {
+  state.txType = type;
+  openTxModal();
 }
 
 // ---------- wallets ----------
@@ -425,12 +469,13 @@ async function renderTransactions() {
         <thead><tr><th>Date</th><th>Type</th><th>Wallet</th><th>Category</th><th>Note</th><th class="right">Amount</th><th></th></tr></thead>
         <tbody>${transactions.map((t) => {
           const acc = state.accounts.find((a) => a.id === t.accountId);
+          const meta = transactionMeta(t);
           return `
           <tr>
             <td class="mono">${prettyDate(t.date)}${t.isFuture ? ' <span class="pill cyan">scheduled</span>' : ''}</td>
-            <td><span class="pill ${t.type === 'income' ? 'green' : 'red'}">${t.type === 'income' ? 'income' : 'expense'}</span></td>
+            <td><span class="pill ${meta.tone}">${meta.label}</span></td>
             <td>${esc(acc?.name || '—')} <span class="pill gray">${t.currency}</span></td>
-            <td>${esc(t.category)}</td>
+            <td>${t.ledgerKind ? '—' : esc(t.category)}</td>
             <td style="color:var(--muted)">${esc(t.note || '—')}</td>
             <td class="right mono" style="font-weight:700;color:var(--text)">${t.type === 'income' ? '+' : '−'}${fmtNative(t.amount, t.currency)}</td>
             <td><div class="row-actions"><button class="icon-btn" title="delete" onclick="delTx(${t.id})">🗑</button></div></td>
@@ -494,6 +539,11 @@ document.addEventListener('change', (e) => { if (e.target.id === 'tx_date') { /*
 
 async function saveTx() {
   try {
+    const localToday = todayStr();
+    $('#tx_date').max = localToday;
+    if (!$('#tx_date').value || $('#tx_date').value > localToday) {
+      throw new Error("Dates can't be in the future — pick today or earlier 📅");
+    }
     const body = {
       type: state.txType,
       amount: $('#tx_amount').value,
@@ -516,12 +566,178 @@ async function delTx(id) {
   catch (e) { toast(esc(e.message), 'err'); }
 }
 
+// ================= MONEY WITH OTHERS =================
+let receivableAccountSel = null;
+let receiveAccountSel = null;
+let receivableReturnId = null;
+let receivablesCache = [];
+let receivableSaving = false;
+let receivablePaymentSaving = false;
+
+async function renderReceivables() {
+  await refreshAccounts();
+  const { receivables } = await api('/receivables');
+  receivablesCache = receivables;
+  const accountName = (id) => state.accounts.find((a) => a.id === id)?.name || 'wallet';
+  const outstanding = receivables.filter((r) => r.status === 'outstanding');
+  const returned = receivables.filter((r) => r.status === 'returned');
+  const totals = Object.values(outstanding.reduce((all, item) => {
+    const group = all[item.currency] ||= { currency: item.currency, amount: 0, count: 0 };
+    group.amount += item.remainingAmount;
+    group.count += 1;
+    return all;
+  }, {}));
+  const card = (item) => `
+    <div class="card liab-card ${item.status === 'returned' ? 'paid' : ''}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+        <h3 style="font-size:16px">${esc(item.person)}</h3>
+        ${item.status === 'returned' ? '<span class="pill green">✓ paid back</span>' : '<span class="pill amber">waiting</span>'}
+      </div>
+      <div class="amt">${fmtNative(item.status === 'returned' ? item.amount : item.remainingAmount, item.currency)}${item.status === 'outstanding' ? ' remaining' : ''}</div>
+      <div class="due">${esc(item.reason)}</div>
+      <div class="due">original ${fmtNative(item.amount, item.currency)} · paid ${fmtNative(item.paidAmount, item.currency)}</div>
+      <div class="due">given ${prettyDate(item.date)} from ${esc(accountName(item.sourceAccountId))}${item.returnedDate ? ` · fully returned ${prettyDate(item.returnedDate)}` : ''}</div>
+      ${item.payments.length ? `<div class="payment-history">${item.payments.map((p) =>
+        `<span>${prettyDate(p.date)} · +${fmtNative(p.amount, item.currency)} to ${esc(accountName(p.accountId))}</span>`).join('')}</div>` : ''}
+      <div class="acts">
+        ${item.status === 'outstanding'
+          ? `<button class="btn sm" onclick="openReceiveMoney(${item.id})">Add payment</button>` : ''}
+        ${item.paidAmount > 0 ? `<button class="btn sm ghost" onclick="reopenReceivable(${item.id})">Undo last payment</button>` : ''}
+        <button class="btn sm ghost" onclick="deleteReceivable(${item.id})">Delete</button>
+      </div>
+    </div>`;
+  $('#view-receivables').innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:16px" class="fade-in">
+      <button class="btn" onclick="openReceivableModal()">＋ Add money record</button>
+    </div>
+    ${totals.length ? `<div class="grid cols-3 fade-in" style="margin-bottom:20px">${totals.map((t) => `
+      <div class="card stat"><div class="k">Owed to you · ${t.currency}</div><div class="v">${fmtNative(t.amount, t.currency)}</div><div class="d">${t.count} open record${t.count === 1 ? '' : 's'}</div></div>`).join('')}</div>` : ''}
+    ${outstanding.length ? `<div class="liab-grid fade-in">${outstanding.map(card).join('')}</div>`
+      : `<div class="empty fade-in"><div class="big">🤝</div>no money is currently with other people</div>`}
+    ${returned.length ? `<div class="sec-head"><h3>Paid back</h3></div><div class="liab-grid fade-in">${returned.map(card).join('')}</div>` : ''}`;
+}
+
+async function openReceivableModal() {
+  await refreshAccounts();
+  receivableAccountSel = customSelect($('#rc_account'), {
+    options: state.accounts.map((a) => ({
+      value: a.id, label: a.name, icon: curOf(a.currency).symbol,
+      sub: `${a.currency} · balance ${fmtNative(a.nativeBalance, a.currency)}`
+    })),
+    value: state.receivableAccount ?? state.accounts[0]?.id ?? null,
+    onChange: (v) => { state.receivableAccount = v; }
+  });
+  state.receivableAccount = receivableAccountSel.value;
+  const localToday = todayStr();
+  $('#rc_date').value = localToday;
+  $('#rc_date').max = localToday;
+  $('#receivableModal').classList.add('on');
+  $('#rc_person').focus();
+}
+
+async function saveReceivable() {
+  if (receivableSaving) return;
+  receivableSaving = true;
+  const saveButton = $('#saveReceivableBtn');
+  if (saveButton) saveButton.disabled = true;
+  try {
+    const localToday = todayStr();
+    $('#rc_date').max = localToday;
+    if (!$('#rc_date').value || $('#rc_date').value > localToday) {
+      throw new Error("Dates can't be in the future — pick today or earlier 📅");
+    }
+    await api('/receivables', { method: 'POST', body: {
+      person: $('#rc_person').value,
+      reason: $('#rc_reason').value,
+      amount: $('#rc_amount').value,
+      accountId: receivableAccountSel?.value,
+      date: $('#rc_date').value
+    }});
+    closeModal('receivableModal');
+    ['#rc_person', '#rc_reason', '#rc_amount'].forEach((s) => ($(s).value = ''));
+    toast('record saved — amount subtracted from the wallet', 'ok');
+    route(); refreshBadges();
+  } catch (e) {
+    toast(esc(e.message), 'err');
+  } finally {
+    receivableSaving = false;
+    if (saveButton) saveButton.disabled = false;
+  }
+}
+
+async function openReceiveMoney(id) {
+  const item = receivablesCache.find((r) => r.id === id);
+  if (!item) return;
+  await refreshAccounts();
+  const matching = state.accounts.filter((a) => a.currency === item.currency);
+  if (!matching.length) return toast(`Create a ${item.currency} wallet before receiving this money`, 'err');
+  receivableReturnId = id;
+  $('#receiveMoneyText').textContent = `${item.person} still owes ${fmtNative(item.remainingAmount, item.currency)}. Enter the amount received.`;
+  $('#rc_receive_amount').value = item.remainingAmount;
+  $('#rc_receive_amount').max = item.remainingAmount;
+  receiveAccountSel = customSelect($('#rc_receive_account'), {
+    options: matching.map((a) => ({
+      value: a.id, label: a.name, icon: curOf(a.currency).symbol,
+      sub: `${a.currency} · balance ${fmtNative(a.nativeBalance, a.currency)}`
+    })),
+    value: matching.find((a) => a.id === item.sourceAccountId)?.id ?? matching[0].id,
+    onChange: () => {}
+  });
+  $('#receiveMoneyModal').classList.add('on');
+}
+
+async function confirmReceivablePaid() {
+  if (receivablePaymentSaving) return;
+  receivablePaymentSaving = true;
+  const paymentButton = $('#confirmReceivablePaidBtn');
+  if (paymentButton) paymentButton.disabled = true;
+  try {
+    await api('/receivables/' + receivableReturnId, {
+      method: 'PATCH', body: {
+        status: 'returned',
+        amount: $('#rc_receive_amount').value,
+        accountId: receiveAccountSel?.value
+      }
+    });
+    closeModal('receiveMoneyModal');
+    toast('payment added to the selected wallet balance 💰', 'ok');
+    route(); refreshBadges();
+  } catch (e) {
+    toast(esc(e.message), 'err');
+  } finally {
+    receivablePaymentSaving = false;
+    if (paymentButton) paymentButton.disabled = false;
+  }
+}
+
+async function reopenReceivable(id) {
+  try {
+    await api('/receivables/' + id, { method: 'PATCH', body: { status: 'outstanding' } });
+    toast('last payment undone — linked income removed', 'ok');
+    route(); refreshBadges();
+  } catch (e) { toast(esc(e.message), 'err'); }
+}
+
+async function deleteReceivable(id) {
+  if (!confirm('Delete this money record and its linked wallet entries?')) return;
+  try {
+    await api('/receivables/' + id, { method: 'DELETE' });
+    toast('money record deleted', 'ok');
+    route(); refreshBadges();
+  } catch (e) { toast(esc(e.message), 'err'); }
+}
+
 // ================= LIABILITIES =================
 let liabAccountSel = null;
+let liabPayWalletSel = null;
+let liabilitiesCache = [];
+let activeLiabilityId = null;
+let liabPaymentSaving = false;
 
 async function renderLiabilities() {
   await refreshAccounts();
   const { liabilities } = await api('/liabilities');
+  liabilitiesCache = liabilities;
   const accName = (id) => state.accounts.find((a) => a.id === id)?.name || 'wallet';
   const card = (l) => {
     const badge = l.status === 'paid' ? '<span class="pill green">✓ paid</span>'
@@ -533,12 +749,16 @@ async function renderLiabilities() {
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
           <h3 style="font-size:16px">${esc(l.name)}</h3>${badge}
         </div>
-        <div class="amt">${fmtNative(l.nativeAmount ?? l.amount, l.currency)}</div>
+        <div class="amt">${fmtNative(l.status === 'paid' ? l.amount : l.remainingAmount, l.currency)}${l.status === 'unpaid' ? ' remaining' : ''}</div>
+        <div class="due">to: ${esc(l.creditor || 'Not specified')} · ${esc(l.name)}</div>
+        <div class="due">original ${fmtNative(l.amount, l.currency)} · paid ${fmtNative(l.paidAmount, l.currency)}</div>
         <div class="due">wallet: ${esc(accName(l.accountId))} · due ${prettyDate(l.dueDate)}${l.status === 'paid' && l.paidDate ? ` · paid ${prettyDate(l.paidDate)}` : ''}</div>
+        ${l.payments.length ? `<div class="payment-history">${l.payments.map((p) =>
+          `<span>${prettyDate(p.date)} · −${fmtNative(p.amount, l.currency)} from ${esc(accName(p.accountId))}</span>`).join('')}</div>` : ''}
         <div class="acts">
-          ${l.status === 'unpaid'
-            ? `<button class="btn sm" onclick="payLiab(${l.id})">Mark paid ✓</button>`
-            : `<button class="btn sm ghost" onclick="unpayLiab(${l.id})">Undo payment</button>`}
+          ${l.status === 'unpaid' ? `<button class="btn sm" onclick="payLiab(${l.id})">Add payment</button>` : ''}
+          ${l.paidAmount > 0 ? `<button class="btn sm ghost" onclick="unpayLiab(${l.id})">Undo last payment</button>` : ''}
+          <button class="btn sm ghost" onclick="openLiabDueDate(${l.id})">Adjust due date</button>
           <button class="btn sm ghost" onclick="delLiab(${l.id})">Delete</button>
         </div>
       </div>`;
@@ -565,33 +785,89 @@ function openLiabModal() {
   });
   $('#lb_due').value = todayStr();
   $('#liabModal').classList.add('on');
-  $('#lb_name').focus();
+  $('#lb_creditor').focus();
 }
 
 async function saveLiab() {
   try {
     await api('/liabilities', { method: 'POST', body: {
-      name: $('#lb_name').value, amount: $('#lb_amount').value,
+      creditor: $('#lb_creditor').value, name: $('#lb_name').value, amount: $('#lb_amount').value,
       accountId: liabAccountSel?.value, dueDate: $('#lb_due').value
     }});
     closeModal('liabModal');
-    ['#lb_name', '#lb_amount'].forEach((s) => ($(s).value = ''));
+    ['#lb_creditor', '#lb_name', '#lb_amount'].forEach((s) => ($(s).value = ''));
     toast('liability added — you\'ll get alerts before it\'s due ⏰', 'ok');
     route(); refreshBadges();
   } catch (e) { toast(esc(e.message), 'err'); }
 }
 
 async function payLiab(id) {
+  await refreshAccounts();
+  let liability = liabilitiesCache.find((l) => l.id === id);
+  if (!liability) {
+    const result = await api('/liabilities');
+    liabilitiesCache = result.liabilities;
+    liability = liabilitiesCache.find((l) => l.id === id);
+  }
+  if (!liability) return toast('Liability not found', 'err');
+  const account = state.accounts.find((a) => a.id === liability.accountId);
+  if (!account) return toast('Liability wallet not found', 'err');
+  activeLiabilityId = id;
+  $('#liabPayText').textContent = `${liability.creditor || 'Creditor'} · ${fmtNative(liability.remainingAmount, liability.currency)} remaining`;
+  $('#lb_pay_amount').value = liability.remainingAmount;
+  $('#lb_pay_amount').max = liability.remainingAmount;
+  liabPayWalletSel = customSelect($('#lb_pay_wallet'), {
+    options: [{
+      value: account.id, label: account.name, icon: curOf(account.currency).symbol,
+      sub: `${account.currency} · balance ${fmtNative(account.nativeBalance, account.currency)}`
+    }],
+    value: account.id,
+    onChange: () => {}
+  });
+  $('#liabPayModal').classList.add('on');
+  $('#lb_pay_amount').focus();
+}
+
+async function saveLiabPayment() {
+  if (liabPaymentSaving) return;
+  liabPaymentSaving = true;
+  const button = $('#saveLiabPaymentBtn');
+  if (button) button.disabled = true;
   try {
-    await api('/liabilities/' + id, { method: 'PATCH', body: { status: 'paid' } });
-    toast('paid off 🎉 logged as an expense on that wallet', 'ok');
+    await api('/liabilities/' + activeLiabilityId, {
+      method: 'PATCH', body: { status: 'paid', amount: $('#lb_pay_amount').value }
+    });
+    closeModal('liabPayModal');
+    toast('liability payment recorded as a wallet expense', 'ok');
     route(); refreshBadges();
-  } catch (e) { toast(esc(e.message), 'err'); }
+  } catch (e) {
+    toast(esc(e.message), 'err');
+  } finally {
+    liabPaymentSaving = false;
+    if (button) button.disabled = false;
+  }
 }
 async function unpayLiab(id) {
   try {
     await api('/liabilities/' + id, { method: 'PATCH', body: { status: 'unpaid' } });
-    toast('payment undone — expense removed', 'ok');
+    toast('last payment undone — linked expense removed', 'ok');
+    route(); refreshBadges();
+  } catch (e) { toast(esc(e.message), 'err'); }
+}
+function openLiabDueDate(id) {
+  const liability = liabilitiesCache.find((l) => l.id === id);
+  if (!liability) return;
+  activeLiabilityId = id;
+  $('#lb_new_due').value = liability.dueDate;
+  $('#liabDueModal').classList.add('on');
+}
+async function saveLiabDueDate() {
+  try {
+    await api('/liabilities/' + activeLiabilityId, {
+      method: 'PATCH', body: { dueDate: $('#lb_new_due').value }
+    });
+    closeModal('liabDueModal');
+    toast('due date updated 📅', 'ok');
     route(); refreshBadges();
   } catch (e) { toast(esc(e.message), 'err'); }
 }
@@ -678,7 +954,7 @@ async function renderForecast() {
 
 // ================= ASSISTANT =================
 async function renderAssistant() {
-  const sugg = ['How much can I spend?', 'What do I owe?', 'Forecast next month', 'Where did my money go?', 'Give me advice'];
+  const sugg = ['Financial summary', 'Who owes me?', 'What do I owe?', 'How much can I spend?', 'Forecast next month', 'Where did my money go?', 'Give me advice'];
   $('#view-assistant').innerHTML = `
     <div class="card chat-wrap fade-in">
       <div class="chat-log" id="chatLog">

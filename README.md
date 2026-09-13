@@ -55,9 +55,11 @@ On first boot the app creates the administrator from the required `ADMIN_EMAIL` 
 - **Auth + admin verification** — sign-ups land in a *pending* state and can't log in until an admin approves them in the **Admin** tab (verify / reject / delete).
 - **Multi-currency wallets** 🪙 — every user gets a "Main" wallet in their signup currency and can add **more wallets in other currencies** from the dashboard. Each wallet keeps its own currency and stable balance; currencies are never converted or added together. Base currency is locked at signup.
 - **Income & expenses** — categorize, note, date them (**today or earlier only**). Entries save in the wallet's currency.
+- **Money with others** 👥 — record a person's name, reason, amount, date, and source wallet. Saving subtracts the money from that wallet; full or partial repayments add linked income to the selected same-currency wallet and track the remaining amount.
+- **Correct activity classification** — lending, repayments, and liability payments change wallet balances but are labelled **owed to you**, **paid back**, or **debt payment**. They are excluded from income, expense, category, and forecast calculations.
 - **Over-balance guard** 🚫 — an expense is rejected if it would push *that wallet's* balance below zero.
-- **Liabilities + due-date alerts** ⏰ — debts with due dates, tied to a wallet; overdue (🔴) and due-within-7-days (🟡) alerts in the bell, dashboard, and nav badge. Marking one *paid* records a linked expense on that wallet (undo reverses it).
-- **Zeno AI** 🤖 — a local assistant that reads your live data: total + per-wallet balance, spending by category, top leaks, what you owe, next-month forecast, and advice. No external API needed.
+- **Liabilities + due-date alerts** ⏰ — record who you owe, the reason, amount, wallet, and an adjustable due date. Full or partial payments create linked wallet expenses, track payment history and remaining balance, and support undoing the latest payment. Overdue (🔴) and due-within-7-days (🟡) alerts appear in the bell, dashboard, and nav badge.
+- **Zeno AI** 🤖 — a local assistant that reads live wallet balances, ordinary income/spending, who owes you, partial repayments, liabilities, debt payments, due dates, forecasts, and advice. It keeps debt movements separate from income and expenses. No external API needed.
 - **Forecasting** 📈 — linear-regression trend (damped) over your history projects income, spending, and net for the next 3 months, plus an expected category breakdown, drawn as an SVG chart.
 - **Custom dropdowns** — styled currency/category/wallet pickers instead of native selects.
 - **Receipt upload + OCR** 🧾 — in the Add-transaction modal, upload a receipt photo (click, drag & drop or paste from clipboard); on-device OCR (Tesseract.js) with image preprocessing (upscale, grayscale, contrast stretch) extracts the total, date and merchant and prefills the form for you to confirm.
@@ -72,4 +74,4 @@ On first boot the app creates the administrator from the required `ADMIN_EMAIL` 
 
 ## API sketch
 
-`POST /api/register · /api/login · /api/logout` — `GET/PUT /api/me` — `GET /api/summary` — `GET/POST/DELETE /api/transactions` — `GET/POST/PATCH/DELETE /api/liabilities` — `GET /api/forecast` — `POST /api/chat` — `GET /api/admin/users · /api/admin/stats`, `PATCH/DELETE /api/admin/users/:id` (admin only).
+`POST /api/register · /api/login · /api/logout` — `GET/PUT /api/me` — `GET /api/summary` — `GET/POST/DELETE /api/transactions` — `GET/POST/PATCH/DELETE /api/receivables` — `GET/POST/PATCH/DELETE /api/liabilities` — `GET /api/forecast` — `POST /api/chat` — `GET /api/admin/users · /api/admin/stats`, `PATCH/DELETE /api/admin/users/:id` (admin only).

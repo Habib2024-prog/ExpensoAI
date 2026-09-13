@@ -191,8 +191,114 @@ input[type=date] { color-scheme: dark; }
   color: var(--muted); font-size: 10px; font-weight: 700; padding: 7px 13px; border-radius: 999px; font-family: var(--font-head);
 }
 .bottom-nav a.on { color: var(--text); background: rgba(139,92,246,.2); }
+@media (max-width: 480px) {
+  .bottom-nav { max-width: calc(100vw - 16px); padding: 7px 8px; overflow-x: auto; }
+  .bottom-nav a { padding: 7px 9px; flex: 0 0 auto; }
+  .bottom-nav::-webkit-scrollbar { display: none; }
+}
 
 /* ---------- dashboard ---------- */
+.dash-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin: -8px 0 18px;
+}
+.dash-actions a { text-decoration: none; }
+.dash-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(380px, .85fr);
+  gap: 18px;
+  align-items: stretch;
+}
+.dash-balance {
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dash-balance-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.dash-balance .eyebrow,
+.dash-metric .k {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.dash-balance .amount {
+  font-family: var(--font-head);
+  font-size: clamp(38px, 5vw, 58px);
+  font-weight: 700;
+  letter-spacing: -.045em;
+  margin-top: 8px;
+  line-height: 1.05;
+}
+.balance-note { color: var(--muted); font-size: 13px; margin-top: 10px; line-height: 1.55; }
+.spark.compact { height: 92px; margin-top: auto; padding-top: 18px; }
+.dash-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.dash-metric {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-width: 0;
+  padding: 18px;
+  text-decoration: none;
+  color: var(--text);
+}
+.dash-metric > div:last-child { min-width: 0; }
+.dash-metric .metric-icon {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  font-size: 17px;
+  background: rgba(255,255,255,.06);
+}
+.dash-metric .v {
+  font-family: var(--font-head);
+  font-size: clamp(17px, 2vw, 22px);
+  font-weight: 700;
+  margin: 5px 0 2px;
+  overflow-wrap: anywhere;
+}
+.dash-metric .d { color: var(--muted); font-size: 11.5px; }
+.income-metric { border-color: rgba(52,211,153,.2); }
+.income-metric .v { color: var(--green); }
+.expense-metric { border-color: rgba(251,113,133,.2); }
+.expense-metric .v { color: var(--red); }
+.owed-metric { border-color: rgba(34,211,238,.2); }
+.owed-metric .v { color: var(--cyan); }
+.liability-metric { border-color: rgba(251,191,36,.2); }
+.liability-metric .v { color: var(--amber); }
+.dash-section-head { margin: 28px 0 13px; }
+.dash-section-head p { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.dash-wallets { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.dash-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, .75fr);
+  gap: 22px;
+  margin-top: 4px;
+  align-items: start;
+}
+.dash-content .activity-card { padding-top: 8px; padding-bottom: 8px; }
+.dash-content .sec-head { margin-top: 24px; }
+.dash-scheduled { margin-top: 8px; }
+@media (max-width: 1050px) {
+  .dash-overview, .dash-content { grid-template-columns: 1fr; }
+  .dash-balance { min-height: 280px; }
+}
+@media (max-width: 580px) {
+  .dash-actions { justify-content: stretch; }
+  .dash-actions .btn { flex: 1 1 calc(50% - 9px); padding-inline: 12px; }
+  .dash-metrics { grid-template-columns: 1fr; }
+  .dash-balance { min-height: 250px; }
+  .dash-balance .amount { font-size: 36px; }
+  .dash-metric { padding: 15px; }
+}
 .grid { display: grid; gap: 18px; }
 .grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
 .grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
@@ -226,12 +332,18 @@ input[type=date] { color-scheme: dark; }
 .tx-ico { width: 40px; height: 40px; border-radius: 13px; display: flex; align-items: center; justify-content: center; font-size: 17px; flex-shrink: 0; }
 .tx-ico.income { background: rgba(52,211,153,.13); }
 .tx-ico.expense { background: rgba(251,113,133,.12); }
+.tx-ico.owed { background: rgba(251,191,36,.14); }
+.tx-ico.paid-back { background: rgba(34,211,238,.13); }
+.tx-ico.debt-payment { background: rgba(167,139,250,.15); }
 .tx-mid { flex: 1; min-width: 0; }
 .tx-mid .t { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tx-mid .s { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .tx-amt { font-family: var(--font-head); font-weight: 700; font-size: 15px; white-space: nowrap; }
 .tx-amt.income { color: var(--green); }
 .tx-amt.expense { color: var(--red); }
+.tx-amt.owed { color: var(--amber); }
+.tx-amt.paid-back { color: var(--cyan); }
+.tx-amt.debt-payment { color: #c4b5fd; }
 
 .sec-head { display: flex; align-items: center; justify-content: space-between; margin: 30px 0 14px; }
 .sec-head h3 { font-size: 18px; }
@@ -259,11 +371,21 @@ input[type=date] { color-scheme: dark; }
 
 /* ---------- liabilities ---------- */
 .liab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
-.liab-card { position: relative; }
+.liab-card { position: relative; display: flex; flex-direction: column; min-width: 0; }
 .liab-card.paid { opacity: .55; }
 .liab-card .amt { font-family: var(--font-head); font-size: 26px; font-weight: 700; margin: 6px 0 2px; }
 .liab-card .due { font-size: 13px; color: var(--muted); }
-.liab-card .acts { display: flex; gap: 8px; margin-top: 16px; }
+.liab-card .acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 16px;
+  width: 100%;
+}
+.liab-card .acts .btn { flex: 1 1 140px; min-width: 0; padding-inline: 12px; }
+.payment-history { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--stroke); }
+.payment-history span { color: var(--muted); font-size: 12px; }
 
 /* ---------- forecast ---------- */
 .legend { display: flex; gap: 16px; font-size: 12.5px; color: var(--muted); margin-top: 12px; flex-wrap: wrap; }

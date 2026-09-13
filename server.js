@@ -69,6 +69,15 @@ function isValidDateString(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
+// Browsers send Date#getTimezoneOffset so "today" follows the user's local
+// calendar day, including on phones near midnight. Invalid headers fall back
+// to the server's UTC date.
+function todayForRequest(req) {
+  const offset = Number(req.get('x-timezone-offset'));
+  if (!Number.isFinite(offset) || offset < -840 || offset > 840) return todayStr();
+  return new Date(Date.now() - offset * 60000).toISOString().slice(0, 10);
+}
+
 // ---------- auth routes ----------
 
 app.post('/api/register', (req, res) => {
@@ -164,7 +173,7 @@ app.get('/api/meta', (req, res) => {
 
 app.get('/api/accounts', auth, (req, res) => {
   const db = getDb();
-  const today = todayStr();
+  const today = todayForRequest(req);
   const accounts = db.accounts
     .filter((a) => a.userId === req.user.id)
     .map((a) => {
@@ -204,18 +213,33 @@ app.delete('/api/accounts/:id', auth, (req, res) => {
 
 // ---------- summary / dashboard ----------
 
-const decorateTx = () => (t) => ({
+const decorateTx = (req) => (t) => ({
   ...t,
-  isFuture: t.date > todayStr()
+  isFuture: t.date > todayForRequest(req)
 });
+
+const liabilityPaidAmount = (liability) => round2(
+  (liability.payments || []).reduce((sum, payment) => sum + payment.amount, 0)
+);
+const liabilityRemainingAmount = (liability) => round2(
+  Math.max(0, liability.amount - liabilityPaidAmount(liability))
+);
+const receivablePaidAmount = (receivable) => round2(
+  (receivable.payments || []).reduce((sum, payment) => sum + payment.amount, 0)
+);
+const receivableRemainingAmount = (receivable) => round2(
+  Math.max(0, receivable.amount - receivablePaidAmount(receivable))
+);
 
 app.get('/api/summary', auth, (req, res) => {
   const db = getDb();
-  const today = todayStr();
+  const today = todayForRequest(req);
   const txs = db.transactions.filter((t) => t.userId === req.user.id);
   const primaryTxs = txs.filter((t) => t.currency === req.user.currency);
   const settled = primaryTxs.filter((t) => t.date <= today);
   const scheduled = primaryTxs.filter((t) => t.date > today);
+  const activitySettled = settled.filter((t) => !t.ledgerKind);
+  const activityScheduled = scheduled.filter((t) => !t.ledgerKind);
   const sum = (items, type) => round2(items
     .filter((t) => !type || t.type === type)
     .reduce((total, item) => total + item.amount, 0));
@@ -223,6 +247,7 @@ app.get('/api/summary', auth, (req, res) => {
   const thisMonth = today.slice(0, 7);
   const unpaid = db.liabilities.filter((l) => l.userId === req.user.id && l.status === 'unpaid');
   const primaryUnpaid = unpaid.filter((l) => l.currency === req.user.currency);
+  const outstandingReceivables = db.receivables.filter((r) => r.userId === req.user.id && r.status === 'outstanding');
 
   const accounts = db.accounts.filter((a) => a.userId === req.user.id).map((a) => {
     const accountTxs = txs.filter((t) => t.accountId === a.id && t.date <= today);
@@ -236,7 +261,14 @@ app.get('/api/summary', auth, (req, res) => {
 
   const liabilityTotals = Object.values(unpaid.reduce((totals, l) => {
     const group = totals[l.currency] ||= { currency: l.currency, amount: 0, count: 0 };
-    group.amount += l.amount;
+    group.amount += liabilityRemainingAmount(l);
+    group.count += 1;
+    return totals;
+  }, {})).map((group) => ({ ...group, amount: round2(group.amount) }));
+
+  const receivableTotals = Object.values(outstandingReceivables.reduce((totals, item) => {
+    const group = totals[item.currency] ||= { currency: item.currency, amount: 0, count: 0 };
+    group.amount += receivableRemainingAmount(item);
     group.count += 1;
     return totals;
   }, {})).map((group) => ({ ...group, amount: round2(group.amount) }));
@@ -244,20 +276,22 @@ app.get('/api/summary', auth, (req, res) => {
   res.json({
     baseCurrency: req.user.currency,
     balance,
-    incomeAll: sum(settled, 'income'),
-    expenseAll: sum(settled, 'expense'),
-    incomeThisMonth: sum(settled.filter((t) => t.date.slice(0, 7) === thisMonth), 'income'),
-    expenseThisMonth: sum(settled.filter((t) => t.date.slice(0, 7) === thisMonth), 'expense'),
-    liabilitiesUnpaid: round2(primaryUnpaid.reduce((total, item) => total + item.amount, 0)),
+    incomeAll: sum(activitySettled, 'income'),
+    expenseAll: sum(activitySettled, 'expense'),
+    incomeThisMonth: sum(activitySettled.filter((t) => t.date.slice(0, 7) === thisMonth), 'income'),
+    expenseThisMonth: sum(activitySettled.filter((t) => t.date.slice(0, 7) === thisMonth), 'expense'),
+    liabilitiesUnpaid: round2(primaryUnpaid.reduce((total, item) => total + liabilityRemainingAmount(item), 0)),
     liabilitiesCount: unpaid.length,
     liabilityTotals,
-    scheduledIn: sum(scheduled, 'income'),
-    scheduledOut: sum(scheduled, 'expense'),
-    projected: round2(balance + sum(scheduled, 'income') - sum(scheduled, 'expense')),
+    receivablesCount: outstandingReceivables.length,
+    receivableTotals,
+    scheduledIn: sum(activityScheduled, 'income'),
+    scheduledOut: sum(activityScheduled, 'expense'),
+    projected: round2(balance + sum(activityScheduled, 'income') - sum(activityScheduled, 'expense')),
     accounts,
-    alerts: buildAlerts(req.user.id),
-    recent: txs.slice().sort((a, b) => (b.date + b.id).localeCompare(a.date + a.id)).slice(0, 8).map(decorateTx()),
-    scheduledTx: scheduled.sort((a, b) => a.date.localeCompare(b.date)).slice(0, 6).map(decorateTx())
+    alerts: buildAlerts(req.user.id, today),
+    recent: txs.slice().sort((a, b) => (b.date + b.id).localeCompare(a.date + a.id)).slice(0, 8).map(decorateTx(req)),
+    scheduledTx: scheduled.sort((a, b) => a.date.localeCompare(b.date)).slice(0, 6).map(decorateTx(req))
   });
 });
 
@@ -267,7 +301,7 @@ app.get('/api/transactions', auth, (req, res) => {
   const db = getDb();
   let txs = db.transactions.filter((t) => t.userId === req.user.id);
   const { type, from, to, q, account } = req.query;
-  if (type === 'income' || type === 'expense') txs = txs.filter((t) => t.type === type);
+  if (type === 'income' || type === 'expense') txs = txs.filter((t) => t.type === type && !t.ledgerKind);
   if (from) txs = txs.filter((t) => t.date >= from);
   if (to) txs = txs.filter((t) => t.date <= to);
   if (account) txs = txs.filter((t) => t.accountId === Number(account));
@@ -288,7 +322,7 @@ app.post('/api/transactions', auth, (req, res) => {
   if (!['income', 'expense'].includes(type)) return res.status(400).json({ error: 'Type must be income or expense' });
   if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) return res.status(400).json({ error: 'Amount must be a finite positive number of at least 0.01' });
   if (!isValidDateString(date)) return res.status(400).json({ error: 'Pick a valid date' });
-  if (date > todayStr()) return res.status(400).json({ error: "Dates can't be in the future — pick today or earlier 📅" });
+  if (date > todayForRequest(req)) return res.status(400).json({ error: "Dates can't be in the future — pick today or earlier 📅" });
 
   const account = db.accounts.find((a) => a.id === Number(accountId) && a.userId === req.user.id);
   if (!account) return res.status(400).json({ error: 'Pick one of your wallets' });
@@ -326,9 +360,19 @@ app.delete('/api/transactions/:id', auth, (req, res) => {
   const idx = db.transactions.findIndex((t) => t.id === Number(req.params.id) && t.userId === req.user.id);
   if (idx === -1) return res.status(404).json({ error: 'Transaction not found' });
   const transaction = db.transactions[idx];
-  const linkedLiability = db.liabilities.find((l) => l.linkedTransactionId === transaction.id);
+  const linkedLiability = db.liabilities.find((l) =>
+    l.linkedTransactionId === transaction.id || l.payments?.some((p) => p.transactionId === transaction.id));
   if (linkedLiability) {
     return res.status(400).json({ error: 'This payment belongs to a liability. Undo or delete the liability instead.' });
+  }
+  const linkedReceivable = db.receivables.find((r) =>
+    r.linkedTransactionId === transaction.id || r.payments?.some((p) => p.transactionId === transaction.id));
+  if (linkedReceivable) {
+    return res.status(400).json({ error: 'This income belongs to money paid back. Reopen or delete that record instead.' });
+  }
+  const outgoingReceivable = db.receivables.find((r) => r.outgoingTransactionId === transaction.id);
+  if (outgoingReceivable) {
+    return res.status(400).json({ error: 'This expense belongs to money with another person. Delete that record instead.' });
   }
   if (transaction.type === 'income') {
     const affectedDates = [...new Set(db.transactions
@@ -350,21 +394,27 @@ app.get('/api/liabilities', auth, (req, res) => {
   const db = getDb();
   const items = db.liabilities
     .filter((l) => l.userId === req.user.id)
-    .map((l) => ({
-      ...l,
-      nativeAmount: round2(l.amount),
-      daysLeft: Math.round((new Date(l.dueDate) - new Date(todayStr())) / 86400000)
-    }))
+    .map((l) => {
+      const paidAmount = liabilityPaidAmount(l);
+      return {
+        ...l,
+        nativeAmount: round2(l.amount),
+        paidAmount,
+        remainingAmount: round2(Math.max(0, l.amount - paidAmount)),
+        daysLeft: Math.round((new Date(l.dueDate) - new Date(todayForRequest(req))) / 86400000)
+      };
+    })
     .sort((a, b) => (a.status === b.status ? a.dueDate.localeCompare(b.dueDate) : a.status === 'unpaid' ? -1 : 1));
   res.json({ liabilities: items });
 });
 
 app.post('/api/liabilities', auth, (req, res) => {
-  const { name, amount, accountId, dueDate } = req.body || {};
+  const { creditor, name, amount, accountId, dueDate } = req.body || {};
   const amt = Number(amount);
   const normalizedAmount = round2(amt);
   const db = getDb();
-  if (!name || !Number.isFinite(normalizedAmount) || normalizedAmount <= 0) return res.status(400).json({ error: 'Name and a finite positive amount of at least 0.01 are required' });
+  if (!String(creditor || '').trim()) return res.status(400).json({ error: 'Enter who you owe' });
+  if (!name || !Number.isFinite(normalizedAmount) || normalizedAmount <= 0) return res.status(400).json({ error: 'Reason and a finite positive amount of at least 0.01 are required' });
   if (!isValidDateString(dueDate)) return res.status(400).json({ error: 'Pick a valid due date' });
   const account = db.accounts.find((a) => a.id === Number(accountId) && a.userId === req.user.id);
   if (!account) return res.status(400).json({ error: 'Pick one of your wallets' });
@@ -372,12 +422,14 @@ app.post('/api/liabilities', auth, (req, res) => {
     id: nextId('liability'),
     userId: req.user.id,
     accountId: account.id,
+    creditor: String(creditor).trim().slice(0, 80),
     name: String(name).trim().slice(0, 80),
     amount: normalizedAmount,
     currency: account.currency,
     dueDate,
     status: 'unpaid',
     linkedTransactionId: null,
+    payments: [],
     createdAt: new Date().toISOString()
   };
   db.liabilities.push(liab);
@@ -385,47 +437,66 @@ app.post('/api/liabilities', auth, (req, res) => {
   res.json({ liability: liab });
 });
 
-// mark paid / unpaid — paying records a linked expense on the wallet so balances stay true
+// Partial or full payments create linked expenses on the liability wallet.
 app.patch('/api/liabilities/:id', auth, (req, res) => {
   const db = getDb();
   const liab = db.liabilities.find((l) => l.id === Number(req.params.id) && l.userId === req.user.id);
   if (!liab) return res.status(404).json({ error: 'Liability not found' });
-  const { status } = req.body || {};
+  liab.payments ||= [];
+  const { status, amount, dueDate } = req.body || {};
 
-  if (status === 'paid' && liab.status !== 'paid') {
-    const today = todayStr();
-    const projected = balanceUpToAccount(liab.accountId, today) - liab.amount;
+  if (dueDate !== undefined && status === undefined) {
+    if (!isValidDateString(dueDate)) return res.status(400).json({ error: 'Pick a valid due date' });
+    liab.dueDate = dueDate;
+  } else if (status === 'paid') {
+    const today = todayForRequest(req);
+    const remaining = liabilityRemainingAmount(liab);
+    const paymentAmount = round2(Number(amount ?? remaining));
+    if (remaining <= 0) return res.status(400).json({ error: 'This liability is already fully paid' });
+    if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
+      return res.status(400).json({ error: 'Payment must be a finite positive amount of at least 0.01' });
+    }
+    if (paymentAmount - remaining > 0.0001) {
+      return res.status(400).json({ error: `Payment is greater than the remaining ${remaining} ${liab.currency}` });
+    }
+    const projected = balanceUpToAccount(liab.accountId, today) - paymentAmount;
     if (projected < -0.0001) {
       const acc = db.accounts.find((a) => a.id === liab.accountId);
-      return res.status(400).json({ error: `Not enough balance in "${acc?.name || 'that wallet'}" to pay this off.` });
+      return res.status(400).json({ error: `Not enough balance in "${acc?.name || 'that wallet'}" for this payment.` });
     }
     const tx = {
       id: nextId('tx'),
       userId: req.user.id,
       accountId: liab.accountId,
       type: 'expense',
-      amount: liab.amount,
+      amount: paymentAmount,
       currency: liab.currency,
       category: 'Liability',
+      ledgerKind: 'liability_payment',
       date: today,
-      note: `Paid: ${liab.name}`,
+      note: `Paid ${liab.creditor || 'creditor'}: ${liab.name}`.slice(0, 140),
       createdAt: new Date().toISOString()
     };
     db.transactions.push(tx);
-    liab.status = 'paid';
+    liab.payments.push({ transactionId: tx.id, amount: paymentAmount, date: today, accountId: liab.accountId });
+    liab.status = liabilityPaidAmount(liab) >= liab.amount ? 'paid' : 'unpaid';
     liab.linkedTransactionId = tx.id;
-    liab.paidDate = today;
-  } else if (status === 'unpaid' && liab.status === 'paid') {
-    const txIdx = db.transactions.findIndex((t) => t.id === liab.linkedTransactionId);
+    if (liab.status === 'paid') liab.paidDate = today;
+    else delete liab.paidDate;
+  } else if (status === 'unpaid' && liab.payments.length) {
+    const lastPayment = liab.payments[liab.payments.length - 1];
+    const txIdx = db.transactions.findIndex((t) => t.id === lastPayment.transactionId && t.userId === req.user.id);
     if (txIdx !== -1) db.transactions.splice(txIdx, 1);
+    liab.payments.pop();
     liab.status = 'unpaid';
-    liab.linkedTransactionId = null;
+    liab.linkedTransactionId = liab.payments.at(-1)?.transactionId || null;
     delete liab.paidDate;
   } else {
     return res.status(400).json({ error: 'Invalid status change' });
   }
   save();
-  res.json({ liability: liab });
+  const paidAmount = liabilityPaidAmount(liab);
+  res.json({ liability: { ...liab, paidAmount, remainingAmount: round2(Math.max(0, liab.amount - paidAmount)) } });
 });
 
 app.delete('/api/liabilities/:id', auth, (req, res) => {
@@ -433,11 +504,189 @@ app.delete('/api/liabilities/:id', auth, (req, res) => {
   const idx = db.liabilities.findIndex((l) => l.id === Number(req.params.id) && l.userId === req.user.id);
   if (idx === -1) return res.status(404).json({ error: 'Liability not found' });
   const liab = db.liabilities[idx];
-  if (liab.linkedTransactionId) {
-    const txIdx = db.transactions.findIndex((t) => t.id === liab.linkedTransactionId);
-    if (txIdx !== -1) db.transactions.splice(txIdx, 1);
-  }
+  const paymentIds = new Set([
+    liab.linkedTransactionId,
+    ...(liab.payments || []).map((p) => p.transactionId)
+  ].filter(Boolean));
+  db.transactions = db.transactions.filter((t) => !paymentIds.has(t.id));
   db.liabilities.splice(idx, 1);
+  save();
+  res.json({ ok: true });
+});
+
+// ---------- money with other people ----------
+
+app.get('/api/receivables', auth, (req, res) => {
+  const db = getDb();
+  const receivables = db.receivables
+    .filter((r) => r.userId === req.user.id)
+    .map((r) => {
+      const paidAmount = round2((r.payments || []).reduce((sum, p) => sum + p.amount, 0));
+      return { ...r, paidAmount, remainingAmount: round2(Math.max(0, r.amount - paidAmount)) };
+    })
+    .slice()
+    .sort((a, b) => a.status === b.status
+      ? (b.date + b.id).localeCompare(a.date + a.id)
+      : a.status === 'outstanding' ? -1 : 1);
+  res.json({ receivables });
+});
+
+app.post('/api/receivables', auth, (req, res) => {
+  const { person, reason, amount, accountId, date } = req.body || {};
+  const normalizedAmount = round2(Number(amount));
+  const db = getDb();
+  const personName = String(person || '').trim().slice(0, 80);
+  const reasonText = String(reason || '').trim().slice(0, 160);
+  if (!personName) return res.status(400).json({ error: 'Person name is required' });
+  if (!reasonText) return res.status(400).json({ error: 'Reason is required' });
+  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+    return res.status(400).json({ error: 'Amount must be a finite positive number of at least 0.01' });
+  }
+  if (!isValidDateString(date)) return res.status(400).json({ error: 'Pick a valid date' });
+  if (date > todayForRequest(req)) {
+    return res.status(400).json({ error: "Dates can't be in the future — pick today or earlier 📅" });
+  }
+  const account = db.accounts.find((a) => a.id === Number(accountId) && a.userId === req.user.id);
+  if (!account) return res.status(400).json({ error: 'Pick one of your wallets' });
+  // Match the available balance displayed in the wallet picker. The record's
+  // date is descriptive; the money leaves the user's currently available funds.
+  const available = balanceUpToAccount(account.id, todayForRequest(req));
+  if (available - normalizedAmount < -0.0001) {
+    return res.status(400).json({
+      error: `Not enough balance in "${account.name}". Available: ${available} ${account.currency}`
+    });
+  }
+  const outgoingTx = {
+    id: nextId('tx'), userId: req.user.id, accountId: account.id,
+    type: 'expense', amount: normalizedAmount, currency: account.currency,
+    category: 'Other', ledgerKind: 'money_owed_to_user', date,
+    note: `Money with ${personName}: ${reasonText}`.slice(0, 140),
+    createdAt: new Date().toISOString()
+  };
+  db.transactions.push(outgoingTx);
+  const receivable = {
+    id: nextId('receivable'),
+    userId: req.user.id,
+    sourceAccountId: account.id,
+    person: personName,
+    reason: reasonText,
+    amount: normalizedAmount,
+    currency: account.currency,
+    date,
+    status: 'outstanding',
+    outgoingTransactionId: outgoingTx.id,
+    linkedTransactionId: null,
+    payments: [],
+    createdAt: new Date().toISOString()
+  };
+  db.receivables.push(receivable);
+  save();
+  res.json({ receivable });
+});
+
+function incomeRemovalProblem(db, tx) {
+  const dates = [...new Set(db.transactions
+    .filter((t) => t.accountId === tx.accountId && t.id !== tx.id && t.date >= tx.date)
+    .map((t) => t.date))].sort();
+  return dates.find((date) => balanceUpToAccount(tx.accountId, date, tx.id) < -0.0001);
+}
+
+function removalProblemForTransactions(db, transactions) {
+  const ids = new Set(transactions.map((t) => t.id));
+  const accountIds = new Set(transactions.map((t) => t.accountId));
+  for (const accountId of accountIds) {
+    const removedIncomeDates = transactions
+      .filter((t) => t.accountId === accountId && t.type === 'income')
+      .map((t) => t.date)
+      .sort();
+    if (!removedIncomeDates.length) continue;
+    const affectedFrom = removedIncomeDates[0];
+    const dates = [...new Set(db.transactions
+      .filter((t) => t.accountId === accountId && !ids.has(t.id) && t.date >= affectedFrom)
+      .map((t) => t.date))].sort();
+    for (const date of dates) {
+      const balance = db.transactions
+        .filter((t) => t.accountId === accountId && !ids.has(t.id) && t.date <= date)
+        .reduce((sum, t) => sum + (t.type === 'income' ? t.amount : -t.amount), 0);
+      if (balance < -0.0001) return date;
+    }
+  }
+  return null;
+}
+
+// Each repayment creates its own linked income. The record remains outstanding
+// until all of the original amount has been returned.
+app.patch('/api/receivables/:id', auth, (req, res) => {
+  const db = getDb();
+  const item = db.receivables.find((r) => r.id === Number(req.params.id) && r.userId === req.user.id);
+  if (!item) return res.status(404).json({ error: 'Record not found' });
+  item.payments ||= [];
+  const { status, accountId, amount } = req.body || {};
+  if (status === 'returned') {
+    const paidSoFar = round2(item.payments.reduce((sum, p) => sum + p.amount, 0));
+    const remaining = round2(item.amount - paidSoFar);
+    const paymentAmount = round2(Number(amount ?? remaining));
+    if (remaining <= 0) return res.status(400).json({ error: 'This money has already been fully paid back' });
+    if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
+      return res.status(400).json({ error: 'Payment must be a finite positive amount of at least 0.01' });
+    }
+    if (paymentAmount - remaining > 0.0001) {
+      return res.status(400).json({ error: `Payment is greater than the remaining ${remaining} ${item.currency}` });
+    }
+    const account = db.accounts.find((a) => a.id === Number(accountId) && a.userId === req.user.id);
+    if (!account) return res.status(400).json({ error: 'Pick one of your wallets' });
+    if (account.currency !== item.currency) {
+      return res.status(400).json({ error: `Pick a ${item.currency} wallet so no exchange conversion is needed` });
+    }
+    const paidDate = todayForRequest(req);
+    const tx = {
+      id: nextId('tx'), userId: req.user.id, accountId: account.id,
+      type: 'income', amount: paymentAmount, currency: item.currency,
+      category: 'Other Income', ledgerKind: 'money_returned', date: paidDate,
+      note: `Paid back by ${item.person}: ${item.reason}`.slice(0, 140),
+      createdAt: new Date().toISOString()
+    };
+    db.transactions.push(tx);
+    item.payments.push({ transactionId: tx.id, amount: paymentAmount, date: paidDate, accountId: account.id });
+    const newPaidTotal = round2(paidSoFar + paymentAmount);
+    item.status = newPaidTotal >= item.amount ? 'returned' : 'outstanding';
+    if (item.status === 'returned') item.returnedDate = paidDate;
+    else delete item.returnedDate;
+    item.linkedTransactionId = tx.id; // latest payment, kept for older clients
+  } else if (status === 'outstanding' && item.payments.length) {
+    const payment = item.payments[item.payments.length - 1];
+    const tx = db.transactions.find((t) => t.id === payment.transactionId && t.userId === req.user.id);
+    if (tx) {
+      const negativeDate = incomeRemovalProblem(db, tx);
+      if (negativeDate) return res.status(400).json({ error: `Can't undo this payment because its wallet would go negative on ${negativeDate}. Delete later expenses first.` });
+      db.transactions = db.transactions.filter((t) => t.id !== tx.id);
+    }
+    item.payments.pop();
+    item.status = 'outstanding';
+    item.linkedTransactionId = item.payments.at(-1)?.transactionId || null;
+    delete item.returnedDate;
+  } else {
+    return res.status(400).json({ error: 'Invalid status change' });
+  }
+  save();
+  const paidAmount = round2(item.payments.reduce((sum, p) => sum + p.amount, 0));
+  res.json({ receivable: { ...item, paidAmount, remainingAmount: round2(Math.max(0, item.amount - paidAmount)) } });
+});
+
+app.delete('/api/receivables/:id', auth, (req, res) => {
+  const db = getDb();
+  const idx = db.receivables.findIndex((r) => r.id === Number(req.params.id) && r.userId === req.user.id);
+  if (idx === -1) return res.status(404).json({ error: 'Record not found' });
+  const item = db.receivables[idx];
+  const paymentIds = (item.payments || []).map((p) => p.transactionId);
+  const linkedIds = new Set([item.outgoingTransactionId, item.linkedTransactionId, ...paymentIds].filter(Boolean));
+  const linkedTransactions = db.transactions.filter((t) => linkedIds.has(t.id));
+  if (paymentIds.length || item.linkedTransactionId) {
+    const negativeDate = removalProblemForTransactions(db, linkedTransactions);
+    if (negativeDate) return res.status(400).json({ error: `Can't delete this record because a wallet would go negative on ${negativeDate}. Delete later expenses first.` });
+  }
+  db.transactions = db.transactions.filter((t) => !linkedIds.has(t.id));
+  db.receivables.splice(idx, 1);
   save();
   res.json({ ok: true });
 });
@@ -482,6 +731,7 @@ app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {
   db.users.splice(idx, 1);
   db.transactions = db.transactions.filter((t) => t.userId !== id);
   db.liabilities = db.liabilities.filter((l) => l.userId !== id);
+  db.receivables = db.receivables.filter((r) => r.userId !== id);
   db.accounts = db.accounts.filter((a) => a.userId !== id);
   for (const [tok, s] of Object.entries(db.sessions)) {
     if (s.userId === id) delete db.sessions[tok];
