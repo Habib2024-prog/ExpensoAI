@@ -693,12 +693,12 @@ app.delete('/api/receivables/:id', auth, (req, res) => {
 
 // ---------- forecast & chat ----------
 
-app.get('/api/forecast', auth, (req, res) => res.json(buildForecast(req.user.id, req.user.currency)));
+app.get('/api/forecast', auth, (req, res) => res.json(buildForecast(req.user.id, req.user.currency, todayForRequest(req))));
 
 app.post('/api/chat', auth, (req, res) => {
   const message = String((req.body || {}).message || '').slice(0, 500);
   if (!message.trim()) return res.status(400).json({ error: 'Say something 🫥' });
-  res.json({ reply: chatReply(req.user.id, message, req.user.currency) });
+  res.json({ reply: chatReply(req.user.id, message, req.user.currency, todayForRequest(req)) });
 });
 
 // ---------- admin ----------

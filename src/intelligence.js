@@ -70,22 +70,34 @@ function linearForecast(points, ahead) {
 
 // Forecasts only use wallets in the selected currency. Different currencies
 // remain separate and are never converted or added together.
-export function buildForecast(userId, currency) {
-  const transactions = currencyTransactions(userId, currency).filter((transaction) => !transaction.ledgerKind);
-  const today = todayStr();
+export function buildForecast(userId, currency, referenceDate = todayStr()) {
+  // Cash-flow forecasting includes ordinary activity plus liability payments.
+  // Lending and repayments stay excluded because they are receivable movements.
+  const transactions = currencyTransactions(userId, currency).filter((transaction) =>
+    !transaction.ledgerKind || transaction.ledgerKind === 'liability_payment');
+  const today = referenceDate;
   const currentMonth = today.slice(0, 7);
   const months = [];
-  const firstOfMonth = new Date();
-  firstOfMonth.setDate(1);
+  const [currentYear, currentMonthNumber] = currentMonth.split('-').map(Number);
+  const firstOfMonth = new Date(Date.UTC(currentYear, currentMonthNumber - 1, 1));
   for (let index = 7; index >= 0; index--) {
     const date = new Date(firstOfMonth);
-    date.setMonth(date.getMonth() - index);
+    date.setUTCMonth(date.getUTCMonth() - index);
     months.push(date.toISOString().slice(0, 7));
   }
 
   const history = months.map((key) => {
     const inMonth = transactions.filter((transaction) => monthKey(transaction.date) === key);
-    return { key, label: monthLabel(key), income: amountFor(inMonth, 'income'), expense: amountFor(inMonth, 'expense') };
+    const debtPayments = round2(inMonth
+      .filter((transaction) => transaction.ledgerKind === 'liability_payment')
+      .reduce((sum, transaction) => sum + transaction.amount, 0));
+    return {
+      key,
+      label: monthLabel(key),
+      income: amountFor(inMonth.filter((transaction) => !transaction.ledgerKind), 'income'),
+      expense: amountFor(inMonth, 'expense'),
+      debtPayments
+    };
   });
   const activeHistory = history.filter((item) => item.key < currentMonth && (item.income > 0 || item.expense > 0));
   const incomeForecast = linearForecast(activeHistory.map((item, index) => ({ x: index, y: item.income })), 3);
@@ -93,9 +105,24 @@ export function buildForecast(userId, currency) {
   const future = [];
   for (let index = 1; index <= 3; index++) {
     const date = new Date(firstOfMonth);
-    date.setMonth(date.getMonth() + index);
+    date.setUTCMonth(date.getUTCMonth() + index);
     const key = date.toISOString().slice(0, 7);
-    future.push({ key, label: `${monthLabel(key)} (proj.)`, income: incomeForecast[index - 1], expense: expenseForecast[index - 1], net: round2(incomeForecast[index - 1] - expenseForecast[index - 1]), projected: true });
+    future.push({ key, label: `${monthLabel(key)} (proj.)`, income: incomeForecast[index - 1], trendExpense: expenseForecast[index - 1], liabilityDue: 0, expense: expenseForecast[index - 1], projected: true });
+  }
+
+  const futureKeys = future.map((item) => item.key);
+  for (const liability of userLiabilities(userId).filter((item) => item.status === 'unpaid' && item.currency === currency)) {
+    const paid = round2((liability.payments || []).reduce((sum, payment) => sum + payment.amount, 0));
+    const remaining = round2(Math.max(0, liability.amount - paid));
+    if (!remaining) continue;
+    const dueMonth = liability.dueDate.slice(0, 7);
+    const targetMonth = dueMonth <= currentMonth ? futureKeys[0] : dueMonth;
+    const target = future.find((item) => item.key === targetMonth);
+    if (target) target.liabilityDue = round2(target.liabilityDue + remaining);
+  }
+  for (const item of future) {
+    item.expense = round2(item.trendExpense + item.liabilityDue);
+    item.net = round2(item.income - item.expense);
   }
 
   const recentActive = activeHistory.slice(-3);
@@ -109,12 +136,24 @@ export function buildForecast(userId, currency) {
   const byCategory = Object.entries(categories)
     .map(([category, amount]) => ({ category, amount: round2(amount / periods) }))
     .sort((left, right) => right.amount - left.amount);
+  if (future[0]?.liabilityDue) {
+    const liabilityCategory = byCategory.find((item) => item.category === 'Liability');
+    if (liabilityCategory) liabilityCategory.amount = round2(liabilityCategory.amount + future[0].liabilityDue);
+    else byCategory.push({ category: 'Liability', amount: future[0].liabilityDue });
+    byCategory.sort((left, right) => right.amount - left.amount);
+  }
 
   return {
     currency,
     history,
     future,
-    nextMonth: { income: incomeForecast[0] || 0, expense: expenseForecast[0] || 0, net: round2((incomeForecast[0] || 0) - (expenseForecast[0] || 0)), byCategory },
+    nextMonth: {
+      income: future[0]?.income || 0,
+      expense: future[0]?.expense || 0,
+      liabilityDue: future[0]?.liabilityDue || 0,
+      net: future[0]?.net || 0,
+      byCategory
+    },
     monthlyAvgExpense: round2(activeHistory.length ? activeHistory.reduce((total, item) => total + item.expense, 0) / activeHistory.length : 0)
   };
 }
@@ -140,14 +179,17 @@ export function buildAlerts(userId, referenceDate = todayStr()) {
   };
 }
 
-export function chatReply(userId, message, currency) {
+export function chatReply(userId, message, currency, referenceDate = todayStr()) {
   const db = getDb();
   const user = db.users.find((item) => item.id === userId);
   const transactions = currencyTransactions(userId, currency);
-  const settled = transactions.filter((transaction) => transaction.date <= todayStr());
+  const settled = transactions.filter((transaction) => transaction.date <= referenceDate);
   const activity = settled.filter((transaction) => !transaction.ledgerKind);
-  const thisMonth = todayStr().slice(0, 7);
-  const forecast = buildForecast(userId, currency);
+  const ordinaryExpenses = activity.filter((transaction) => transaction.type === 'expense');
+  const debtPayments = settled.filter((transaction) => transaction.ledgerKind === 'liability_payment');
+  const cashOutflows = [...ordinaryExpenses, ...debtPayments];
+  const thisMonth = referenceDate.slice(0, 7);
+  const forecast = buildForecast(userId, currency, referenceDate);
   const balance = round2(amountFor(settled, 'income') - amountFor(settled, 'expense'));
   const format = (amount, code = currency) => `${(CURRENCIES[code] || { symbol: `${code} ` }).symbol}${round2(amount).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
   const words = String(message || '').toLowerCase();
@@ -168,9 +210,10 @@ export function chatReply(userId, message, currency) {
 
   if (has('overview', 'summary', 'financial position', 'show me everything')) {
     const monthIncome = amountFor(activity.filter((transaction) => monthKey(transaction.date) === thisMonth), 'income');
-    const monthExpense = amountFor(activity.filter((transaction) => monthKey(transaction.date) === thisMonth), 'expense');
+    const monthOrdinaryExpense = amountFor(ordinaryExpenses.filter((transaction) => monthKey(transaction.date) === thisMonth));
+    const monthDebtPayments = amountFor(debtPayments.filter((transaction) => monthKey(transaction.date) === thisMonth));
     const accounts = accountBalances(userId);
-    return `Here is your financial overview:\n- Wallets: ${accounts.map((account) => `**${account.name}** ${format(account.native, account.currency)}`).join(' · ') || 'none'}\n- ${currency} income this month: **${format(monthIncome)}**\n- ${currency} spending this month: **${format(monthExpense)}**\n- Owed to you: **${openReceivables.length ? groupedRemaining(openReceivables) : 'nothing'}** (${openReceivables.length} open)\n- You owe: **${openLiabilities.length ? groupedRemaining(openLiabilities) : 'nothing'}** (${openLiabilities.length} open)\n\nMoney lent, repayments, and debt payments affect wallet balances but stay separate from income and spending.`;
+    return `Here is your financial overview:\n- Wallets: ${accounts.map((account) => `**${account.name}** ${format(account.native, account.currency)}`).join(' · ') || 'none'}\n- ${currency} income this month: **${format(monthIncome)}**\n- ${currency} ordinary spending this month: **${format(monthOrdinaryExpense)}**\n- ${currency} debt payments this month: **${format(monthDebtPayments)}**\n- ${currency} total cash outflow: **${format(monthOrdinaryExpense + monthDebtPayments)}**\n- Owed to you: **${openReceivables.length ? groupedRemaining(openReceivables) : 'nothing'}** (${openReceivables.length} open)\n- You owe: **${openLiabilities.length ? groupedRemaining(openLiabilities) : 'nothing'}** (${openLiabilities.length} open)\n\nDebt payments affect cash-flow forecasts while remaining separately labelled from ordinary expenses.`;
   }
 
   if (has('who owes me', 'owed to me', 'owe me', 'others owe', 'people owe', 'owed by', 'money with others', 'lent money', 'loaned money', 'paid me back', 'paid back to me', 'receivable')) {
@@ -200,7 +243,7 @@ export function chatReply(userId, message, currency) {
 
   if (has('forecast', 'predict', 'next month', 'projection', 'future', 'how much will')) {
     const next = forecast.nextMonth;
-    return `For your ${currency} wallets next month: income **${format(next.income)}**, spending **${format(next.expense)}**, net **${next.net >= 0 ? '+' : ''}${format(next.net)}**.`;
+    return `For your ${currency} wallets next month: income **${format(next.income)}**, projected cash outflow **${format(next.expense)}**, and net **${next.net >= 0 ? '+' : ''}${format(next.net)}**. The outflow includes **${format(next.liabilityDue)}** of known unpaid liabilities due, plus the spending trend and historical debt-payment pattern.`;
   }
 
   if (has('income', 'earn', 'salary', 'make money', 'revenue')) {
@@ -208,11 +251,14 @@ export function chatReply(userId, message, currency) {
     return `In ${currency}, you earned **${format(monthIncome)}** this month and **${format(amountFor(activity, 'income'))}** all time.`;
   }
 
-  const expenses = activity.filter((transaction) => transaction.type === 'expense');
+  const expenses = cashOutflows;
   if (has('biggest', 'top', 'most expensive', 'where did my money', 'spending breakdown', 'breakdown')) {
     if (!expenses.length) return `No ${currency} expenses have been logged yet.`;
     const categories = {};
-    for (const expense of expenses) categories[expense.category] = (categories[expense.category] || 0) + expense.amount;
+    for (const expense of expenses) {
+      const category = expense.ledgerKind === 'liability_payment' ? 'Debt payments' : expense.category;
+      categories[category] = (categories[category] || 0) + expense.amount;
+    }
     const total = amountFor(expenses);
     return 'Your spending by category:\n' + Object.entries(categories).sort((left, right) => right[1] - left[1]).slice(0, 5).map(([category, amount]) => `- **${category}** - ${format(amount)} (${Math.round((amount / total) * 100)}%)`).join('\n');
   }
@@ -226,12 +272,14 @@ export function chatReply(userId, message, currency) {
       const matching = pool.filter((transaction) => transaction.category.toLowerCase() === name.toLowerCase());
       return matching.length ? `You spent **${format(amountFor(matching))}** on ${name} ${monthly ? 'this month' : 'all time'}.` : `No ${name} spending was found ${monthly ? 'this month' : 'yet'}.`;
     }
-    return `Total ${currency} spending ${monthly ? 'this month' : 'all time'} is **${format(amountFor(pool))}**.`;
+    const ordinary = pool.filter((transaction) => !transaction.ledgerKind);
+    const debt = pool.filter((transaction) => transaction.ledgerKind === 'liability_payment');
+    return `${currency} cash outflow ${monthly ? 'this month' : 'all time'} is **${format(amountFor(pool))}**: ordinary spending **${format(amountFor(ordinary))}** plus debt payments **${format(amountFor(debt))}**.`;
   }
 
   if (has('advice', 'tip', 'should i', 'save', 'saving', 'budget')) {
     const monthlyIncome = amountFor(activity.filter((transaction) => monthKey(transaction.date) === thisMonth), 'income');
-    const monthlyExpense = amountFor(activity.filter((transaction) => monthKey(transaction.date) === thisMonth), 'expense');
+    const monthlyExpense = amountFor(cashOutflows.filter((transaction) => monthKey(transaction.date) === thisMonth));
     if (!monthlyIncome) return `Add ${currency} income first and I can calculate a useful savings rate.`;
     let context = '';
     const sameCurrencyOwed = openReceivables.filter((item) => item.currency === currency).reduce((sum, item) => sum + remainingFor(item), 0);

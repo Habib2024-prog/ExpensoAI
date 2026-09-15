@@ -367,7 +367,7 @@ async function renderDashboard() {
         </div>
         <div class="balance-note">Across ${s.accounts.filter((a) => a.currency === state.user.currency).length} ${state.user.currency} wallet${s.accounts.filter((a) => a.currency === state.user.currency).length !== 1 ? 's' : ''}. Other currencies stay separate.</div>
         <div class="spark compact">${months.map((m) => `
-          <div class="bar-w"><div class="bar" style="height:${Math.max(6, (m.expense / maxBar) * 100)}%" title="${m.label}: ${fmtBase(m.expense)} spent"></div><div class="bl">${m.label.split(' ')[0]}</div></div>`).join('')}
+          <div class="bar-w"><div class="bar" style="height:${Math.max(6, (m.expense / maxBar) * 100)}%" title="${m.label}: ${fmtBase(m.expense)} cash outflow"></div><div class="bl">${m.label.split(' ')[0]}</div></div>`).join('')}
         </div>
       </div>
 
@@ -916,9 +916,9 @@ async function renderForecast() {
   $('#view-forecast').innerHTML = `
     <div class="grid cols-3 fade-in" style="margin-bottom:18px">
       <div class="card stat"><span class="k">Projected income · next month</span><div class="v" style="color:var(--green)">${fmtBase(f.nextMonth.income)}</div></div>
-      <div class="card stat"><span class="k">Projected spending · next month</span><div class="v" style="color:var(--red)">${fmtBase(f.nextMonth.expense)}</div></div>
+      <div class="card stat"><span class="k">Projected cash outflow · next month</span><div class="v" style="color:var(--red)">${fmtBase(f.nextMonth.expense)}</div><div class="d">includes ${fmtBase(f.nextMonth.liabilityDue)} known liabilities due</div></div>
       <div class="card stat"><span class="k">Projected net</span><div class="v" style="color:${f.nextMonth.net >= 0 ? 'var(--green)' : 'var(--red)'}">${f.nextMonth.net >= 0 ? '+' : ''}${fmtBase(f.nextMonth.net)}</div>
-        <div class="d">avg monthly spend ${fmtBase(f.monthlyAvgExpense)}</div></div>
+        <div class="d">avg monthly cash outflow ${fmtBase(f.monthlyAvgExpense)}</div></div>
     </div>
     <div class="card fade-in">
       <h3 style="margin-bottom:6px">Cash-flow trend & projection <span class="pill gray" style="margin-left:6px">${state.user.currency} wallets only</span></h3>
@@ -934,15 +934,15 @@ async function renderForecast() {
       </svg>
       <div class="legend">
         <span><span class="sw" style="background:linear-gradient(90deg,#34d399,#67e8f9)"></span>income</span>
-        <span><span class="sw" style="background:linear-gradient(90deg,#fb7185,#e879f9)"></span>expenses</span>
+        <span><span class="sw" style="background:linear-gradient(90deg,#fb7185,#e879f9)"></span>cash outflow (spending + debt payments)</span>
         <span><span class="sw" style="background:repeating-linear-gradient(90deg,#c4b5fd 0 5px,transparent 5px 10px)"></span>dashed = projection (trend-damped)</span>
       </div>
     </div>
     <div class="grid cols-2" style="margin-top:18px">
-      <div class="card fade-in"><h3 style="margin-bottom:12px">Where next month's money goes</h3>
+      <div class="card fade-in"><h3 style="margin-bottom:12px">Where next month's cash goes</h3>
         ${catBars || '<div class="empty">log some expenses to unlock this 🔮</div>'}</div>
       <div class="card fade-in"><h3 style="margin-bottom:12px">3-month outlook</h3>
-        <table class="tbl"><thead><tr><th>Month</th><th class="right">Income</th><th class="right">Spending</th><th class="right">Net</th></tr></thead>
+        <table class="tbl"><thead><tr><th>Month</th><th class="right">Income</th><th class="right">Cash outflow</th><th class="right">Net</th></tr></thead>
         <tbody>${f.future.map((m) => `<tr><td>${esc(m.label)}</td>
           <td class="right mono" style="color:var(--green)">+${fmtBase(m.income)}</td>
           <td class="right mono" style="color:var(--red)">−${fmtBase(m.expense)}</td>
