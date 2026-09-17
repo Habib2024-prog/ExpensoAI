@@ -463,22 +463,22 @@ async function renderTransactions() {
       <input id="fltQ" placeholder="🔍 search note or category…" value="${esc(txFilters.q)}" onkeydown="if(event.key==='Enter'){txFilters.q=this.value;route()}"/>
       <button class="btn" onclick="openTxModal()">＋ New transaction</button>
     </div>
-    <div class="card tbl-wrap fade-in">
+    <div class="card tbl-wrap mobile-table-wrap fade-in">
       ${transactions.length ? `
-      <table class="tbl">
+      <table class="tbl mobile-card-table transaction-table">
         <thead><tr><th>Date</th><th>Type</th><th>Wallet</th><th>Category</th><th>Note</th><th class="right">Amount</th><th></th></tr></thead>
         <tbody>${transactions.map((t) => {
           const acc = state.accounts.find((a) => a.id === t.accountId);
           const meta = transactionMeta(t);
           return `
           <tr>
-            <td class="mono">${prettyDate(t.date)}${t.isFuture ? ' <span class="pill cyan">scheduled</span>' : ''}</td>
-            <td><span class="pill ${meta.tone}">${meta.label}</span></td>
-            <td>${esc(acc?.name || '—')} <span class="pill gray">${t.currency}</span></td>
-            <td>${t.ledgerKind ? '—' : esc(t.category)}</td>
-            <td style="color:var(--muted)">${esc(t.note || '—')}</td>
-            <td class="right mono" style="font-weight:700;color:var(--text)">${t.type === 'income' ? '+' : '−'}${fmtNative(t.amount, t.currency)}</td>
-            <td><div class="row-actions"><button class="icon-btn" title="delete" onclick="delTx(${t.id})">🗑</button></div></td>
+            <td data-label="Date" class="mono">${prettyDate(t.date)}${t.isFuture ? ' <span class="pill cyan">scheduled</span>' : ''}</td>
+            <td data-label="Type"><span class="pill ${meta.tone}">${meta.label}</span></td>
+            <td data-label="Wallet">${esc(acc?.name || '—')} <span class="pill gray">${t.currency}</span></td>
+            <td data-label="Category">${t.ledgerKind ? '—' : esc(t.category)}</td>
+            <td data-label="Note" style="color:var(--muted)">${esc(t.note || '—')}</td>
+            <td data-label="Amount" class="right mono" style="font-weight:700;color:var(--text)">${t.type === 'income' ? '+' : '−'}${fmtNative(t.amount, t.currency)}</td>
+            <td data-label="Actions"><div class="row-actions"><button class="icon-btn" title="delete" onclick="delTx(${t.id})">🗑</button></div></td>
           </tr>`;
         }).join('')}</tbody>
       </table>` : '<div class="empty"><div class="big">🗃️</div>no transactions match. add one!</div>'}
@@ -1012,15 +1012,15 @@ async function renderAdmin() {
       : '<span class="pill red">✕ rejected</span>';
     return `
       <tr>
-        <td><div style="display:flex;align-items:center;gap:10px">
+        <td data-label="User"><div style="display:flex;align-items:center;gap:10px;min-width:0">
           <div class="avatar" style="width:32px;height:32px;font-size:12px">${esc(u.name[0].toUpperCase())}</div>
           <div><div style="font-weight:600">${esc(u.name)}${u.id === state.user.id ? ' <span class="pill gray">you</span>' : ''}</div>
           <div style="font-size:12px;color:var(--muted)">${esc(u.email)}</div></div>
         </div></td>
-        <td>${u.role === 'admin' ? '<span class="pill violet">🛡️ admin</span>' : '<span class="pill gray">user</span>'}</td>
-        <td class="mono">${u.currency}</td>
-        <td>${badge}</td>
-        <td><div class="row-actions">
+        <td data-label="Role">${u.role === 'admin' ? '<span class="pill violet">🛡️ admin</span>' : '<span class="pill gray">user</span>'}</td>
+        <td data-label="Base currency" class="mono">${u.currency}</td>
+        <td data-label="Status">${badge}</td>
+        <td data-label="Actions"><div class="row-actions">
           ${u.status !== 'active' ? `<button class="btn sm" onclick="setUserStatus(${u.id},'active')">Verify ✓</button>` : ''}
           ${u.status === 'active' && u.role !== 'admin' ? `<button class="btn sm ghost" onclick="setUserStatus(${u.id},'rejected')">Reject</button>` : ''}
           ${u.status === 'pending' ? `<button class="btn sm ghost" onclick="setUserStatus(${u.id},'rejected')">Reject</button>` : ''}
@@ -1037,9 +1037,9 @@ async function renderAdmin() {
       <div class="card mini"><div class="v" style="color:var(--red)">${st.rejected}</div><div class="k">rejected</div></div>
       <div class="card mini"><div class="v">${st.transactions}</div><div class="k">transactions</div></div>
     </div>
-    <div class="card tbl-wrap fade-in">
+    <div class="card tbl-wrap mobile-table-wrap fade-in">
       ${st.pending ? `<div class="alert-item due-soon" style="margin-bottom:14px">⏳ <div><b>${st.pending} user${st.pending > 1 ? 's' : ''} waiting for verification</b><br/><small>new sign-ups can't log in until you approve them</small></div></div>` : ''}
-      <table class="tbl">
+      <table class="tbl mobile-card-table admin-table">
         <thead><tr><th>User</th><th>Role</th><th>Base currency</th><th>Status</th><th></th></tr></thead>
         <tbody>${users.map(row).join('')}</tbody>
       </table>

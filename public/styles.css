@@ -369,6 +369,65 @@ input[type=date] { color-scheme: dark; }
 .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
 .filters input, .filters select { width: auto; min-width: 150px; }
 
+@media (max-width: 940px) {
+  .mobile-table-wrap {
+    padding: 0;
+    overflow: visible;
+    background: transparent;
+    border: 0;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .mobile-card-table,
+  .mobile-card-table tbody,
+  .mobile-card-table tr,
+  .mobile-card-table td { display: block; width: 100%; }
+  .mobile-card-table thead { display: none; }
+  .mobile-card-table tr {
+    overflow: hidden;
+    margin-bottom: 12px;
+    padding: 8px 14px;
+    background: var(--glass);
+    border: 1px solid var(--stroke);
+    border-radius: 18px;
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+  }
+  .mobile-card-table td {
+    display: grid;
+    grid-template-columns: minmax(86px, .7fr) minmax(0, 1.3fr);
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--stroke);
+    text-align: right !important;
+    overflow-wrap: anywhere;
+  }
+  .mobile-card-table td:last-child { border-bottom: 0; }
+  .mobile-card-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    text-align: left;
+  }
+  .mobile-card-table td > * { min-width: 0; }
+  .mobile-card-table .row-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .mobile-card-table .row-actions .btn { flex: 1 1 92px; padding-inline: 11px; }
+  .admin-table td[data-label="User"] { align-items: start; }
+  .admin-table td[data-label="User"] > div { justify-content: flex-end; }
+  .admin-table td[data-label="User"] > div > div:last-child { min-width: 0; overflow-wrap: anywhere; }
+  .filters > input,
+  .filters > select,
+  .filters > .btn { width: 100%; min-width: 0; flex: 1 1 100%; }
+}
+
 /* ---------- liabilities ---------- */
 .liab-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
 .liab-card { position: relative; display: flex; flex-direction: column; min-width: 0; }
@@ -533,6 +592,24 @@ input[type=date] { color-scheme: dark; }
   .btn { padding: 11px 18px; }
   .modal { padding: 22px 18px; }
   .mobile-user .btn.sm { padding: 8px 12px; font-size: 12px; }
+  .activity-card { padding-inline: 14px !important; }
+  .tx-row {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 6px 11px;
+    align-items: start;
+    padding: 13px 0;
+  }
+  .tx-ico { width: 36px; height: 36px; border-radius: 11px; grid-row: span 2; }
+  .tx-mid .t { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+  .tx-mid .s { line-height: 1.45; overflow-wrap: anywhere; }
+  .tx-amt {
+    grid-column: 2;
+    justify-self: start;
+    white-space: normal;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
 }
 
 /* --- mobile overflow guards (round 2) --- */
